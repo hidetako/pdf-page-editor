@@ -232,12 +232,18 @@ def _as_rgba(pix: fitz.Pixmap) -> fitz.Pixmap:
 
 
 def recolor_pixmap(pix: fitz.Pixmap, color) -> fitz.Pixmap:
-    """画像印を単色に塗り直す。各ピクセルの「インク量」= alpha × (1 - min(R,G,B))。
-    白は 0、朱・黒などは 1 に近い。アンチエイリアス部分は中間になる。"""
+    """画像印を単色に塗り直す。透明部分がある画像はアルファをインク量に、
+    アルファのない画像は白からの濃さ (1 - min(R,G,B)) をインク量にする。"""
     pix = _as_rgba(pix)
     # MuPDF の alpha 付き samples は事前乗算済み (RGB <= alpha)。出力も同じ形式で作る
     arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 4).astype(np.float32) / 255
-    ink = np.clip(arr[:, :, 3] - arr[:, :, :3].min(axis=2), 0, 1)
+    a = arr[:, :, 3]
+    if a.min() < a.max():
+        # 透明部分がある画像: 形はアルファが持っている（グレーのマスク画像でも薄くならない）
+        ink = a
+    else:
+        # アルファなし（白地の画像）: 白からの濃さ・鮮やかさをインク量にする
+        ink = np.clip(1.0 - arr[:, :, :3].min(axis=2), 0, 1)
     out = np.empty_like(arr)
     for c in range(3):
         out[:, :, c] = color[c] * ink

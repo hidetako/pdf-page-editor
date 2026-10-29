@@ -121,6 +121,17 @@ def main():
     gp = fitz.Pixmap(render_png(lib3.stamps[-1], dpi=150))
     ga = np.frombuffer(gp.samples, dtype=np.uint8).reshape(gp.height, gp.width, 4)
     assert ga[2, 2, 3] == 0 and ga[20, 20, 3] > 250 and ga[20, 20, 2] > 250 and ga[20, 20, 0] < 5, "中央は青・外は透明"
+    # 中間グレー (128) + alpha のマスクでも薄くならない（形はアルファ、濃さは印色そのまま）
+    ga1 = np.zeros((40, 40, 2), dtype=np.uint8); ga1[10:30, 10:30, 0] = 128; ga1[10:30, 10:30, 1] = 255
+    mid = fitz.Pixmap(fitz.csGRAY, 40, 40, ga1.tobytes(), True)
+    s_mid = Stamp(kind="image", color=[0.1, 0.2, 0.9], recolor=True, image_b64=base64.b64encode(mid.tobytes("png")).decode())
+    mp = fitz.Pixmap(render_png(s_mid, dpi=150)); ma = np.frombuffer(mp.samples, dtype=np.uint8).reshape(40, 40, 4)
+    assert ma[20, 20, 3] > 250 and ma[20, 20, 2] > 220, ma[20, 20]
+    # アルファなしの白地画像（赤い丸）は濃さから形を取る
+    opaque_red = fitz.open("pdf", fitz.open(img).convert_to_pdf())[0].get_pixmap(dpi=72)
+    s_op = Stamp(kind="image", color=[0.1, 0.2, 0.9], recolor=True, image_b64=base64.b64encode(opaque_red.tobytes("png")).decode())
+    op = fitz.Pixmap(render_png(s_op, dpi=150)); oa = np.frombuffer(op.samples, dtype=np.uint8).reshape(op.height, op.width, 4)
+    assert oa[2, 2, 3] == 0 and (oa[:, :, 3] > 200).sum() > 50, "白地は透明、赤線は青インクになる"
     p1 = fitz.Pixmap(base64.b64decode(s1.image_b64))
     assert p1.alpha, "不透過 PNG は白地を透過して取り込む"
     a1 = np.frombuffer(p1.samples, dtype=np.uint8).reshape(p1.height, p1.width, 4)
