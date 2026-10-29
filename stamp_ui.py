@@ -81,6 +81,10 @@ class StampEditDialog(QDialog):
         self.btn_img.clicked.connect(self.load_image)
         self.btn_img.setToolTip("スキャン画像や手書きサインを読み込み、白い背景を透明にして印影にする")
         form.addRow("画像印", self.btn_img)
+        self.cb_recolor = QCheckBox("画像を印色で塗り直す")
+        self.cb_recolor.setChecked(self.stamp.recolor)
+        self.cb_recolor.setToolTip("ON にすると画像印も上の「印色」で描く。白地は透明、濃淡はそのまま残る。色を選ぶと自動で ON")
+        form.addRow("", self.cb_recolor)
 
         self.preview = QLabel()
         self.preview.setFixedSize(220, 220)
@@ -105,6 +109,7 @@ class StampEditDialog(QDialog):
             w.valueChanged.connect(self.update_preview)
         self.cb_kind.currentIndexChanged.connect(self.update_preview)
         self.cb_date.currentIndexChanged.connect(self.update_preview)
+        self.cb_recolor.toggled.connect(self.update_preview)
         self._set_color_label()
         self.update_preview()
 
@@ -118,6 +123,8 @@ class StampEditDialog(QDialog):
         col = QColorDialog.getColor(QColor.fromRgbF(*c), self, "印色")
         if col.isValid():
             self.stamp.color = [col.redF(), col.greenF(), col.blueF()]
+            if self.cb_kind.currentData() == "image":
+                self.cb_recolor.setChecked(True)
             self._set_color_label()
             self.update_preview()
 
@@ -145,6 +152,7 @@ class StampEditDialog(QDialog):
         s.border = self.sp_border.value()
         s.font_scale = self.sp_font.value()
         s.date_format = self.cb_date.currentData()
+        s.recolor = self.cb_recolor.isChecked()
         return s
 
     def update_preview(self):

@@ -370,6 +370,23 @@ def main():
     QTest.keyClick(win, Qt.Key_F2); wait()
     assert win.stamp_mode and win.view.ghost is not None, "画像印でもゴーストが出る"
     QTest.keyClick(win, Qt.Key_Escape); wait()
+    # 画像印の編集ダイアログ: 色を選ぶと「印色で塗り直す」が自動 ON になり、保存される
+    from PySide6.QtGui import QColor
+    from PySide6.QtWidgets import QColorDialog
+    QColorDialog.getColor = staticmethod(lambda *a_, **k: QColor(20, 40, 220))
+    def recolor_dialog(self):
+        assert not self.cb_recolor.isChecked()
+        self.pick_color()
+        assert self.cb_recolor.isChecked()
+        return QDialog.Accepted
+    stamp_ui.StampEditDialog.exec = recolor_dialog
+    dock.edit_stamp(); wait()
+    st_img = dock.current_stamp()
+    assert st_img.kind == "image" and st_img.recolor and st_img.color[2] > 0.8
+    pm_img = fitz.Pixmap(dock.render_current())
+    arr_img = np.frombuffer(pm_img.samples, dtype=np.uint8).reshape(pm_img.height, pm_img.width, 4)
+    ink_px = arr_img[arr_img[:, :, 3] > 120]
+    assert len(ink_px) and (ink_px[:, 2] / ink_px[:, 3].astype(float) > 0.8).all(), "塗り直した画像印は青で描かれる"
     shot(win, "stamp_panel")
 
     # ---------------------------------------------------------------- 保存・抽出

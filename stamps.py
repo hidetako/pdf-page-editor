@@ -63,6 +63,7 @@ class Stamp:
     date_format: str = "yyyy.mm.dd"
     font_scale: float = 1.0        # 文字の大きさ倍率
     image_b64: str = ""            # 画像印の PNG (base64)
+    recolor: bool = False          # 画像印を color で塗り直す（白地・濃淡はインク量として扱う）
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def to_dict(self) -> dict:
@@ -198,6 +199,8 @@ def render_png(stamp: Stamp, dpi: int = 600, date: _dt.date | None = None,
         if not stamp.image_b64:
             raise ValueError("画像が設定されていません。")
         src = fitz.Pixmap(base64.b64decode(stamp.image_b64))
+        if stamp.recolor:
+            src = recolor_pixmap(src, stamp.color)
         if tilt_deg == 0 and opacity >= 1.0 and kasure <= 0:
             # 加工なしなら元画像のピクセルをそのまま使う（再サンプリングによるにじみを避ける）
             return _as_rgba(src).tobytes("png")
@@ -226,6 +229,20 @@ def _as_rgba(pix: fitz.Pixmap) -> fitz.Pixmap:
     if not pix.alpha:
         pix = fitz.Pixmap(pix, 1)
     return pix
+
+
+def recolor_pixmap(pix: fitz.Pixmap, color) -> fitz.Pixmap:
+    """画像印を単色に塗り直す。各ピクセルの「インク量」= alpha × (1 - min(R,G,B))。
+    白は 0、朱・黒などは 1 に近い。アンチエイリアス部分は中間になる。"""
+    pix = _as_rgba(pix)
+    # MuPDF の alpha 付き samples は事前乗算済み (RGB <= alpha)。出力も同じ形式で作る
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 4).astype(np.float32) / 255
+    ink = np.clip(arr[:, :, 3] - arr[:, :, :3].min(axis=2), 0, 1)
+    out = np.empty_like(arr)
+    for c in range(3):
+        out[:, :, c] = color[c] * ink
+    out[:, :, 3] = ink
+    return fitz.Pixmap(fitz.csRGB, pix.width, pix.height, (out * 255 + 0.5).astype(np.uint8).tobytes(), True)
 
 
 def _post_process(pix: fitz.Pixmap, opacity: float, kasure: float, seed: int | None) -> fitz.Pixmap:
@@ -259,7 +276,11 @@ def image_to_stamp_png(path: str | bytes, knockout_white: bool = True, threshold
         lum = rgb.mean(axis=2)
         # 明るさに応じて滑らかに透過（threshold 以上は完全透過）
         a = np.clip((threshold - lum) / max(threshold - 60, 1), 0, 1) * 255
-        arr[:, :, 3] = np.minimum(arr[:, :, 3], a.astype(np.uint8))
+        new_a = np.minimum(arr[:, :, 3], a.astype(np.uint8))
+        # samples は事前乗算済みなので、alpha を下げた分だけ RGB も下げる（でないと縁の色が壊れる）
+        old_a = np.maximum(arr[:, :, 3].astype(np.float32), 1)
+        arr[:, :, :3] = (arr[:, :, :3].astype(np.float32) * (new_a / old_a)[:, :, None] + 0.5).astype(np.uint8)
+        arr[:, :, 3] = new_a
     out = fitz.Pixmap(fitz.csRGB, pix.width, pix.height, arr.tobytes(), True)
     return out.tobytes("png")
 
@@ -350,9 +371,26 @@ def import_entstmp(path: str, size_mm: float = 15.0) -> list[Stamp]:
         if not pix.alpha:
             png = image_to_stamp_png(png)
         name = base if len(entities) == 1 else f"{base} {i + 1}"
-        out.append(Stamp(name=name, kind="image", lines=[], size_mm=size_mm,
+        # 画像は色なしのマスク（グレー）で入っていることがあり、元ソフトは col 属性 (AARRGGBB) の色で塗って表示する
+        color = _parse_argb(e.get("col")) or list(SHU)
+        out.append(Stamp(name=name, kind="image", lines=[], size_mm=size_mm, color=color, recolor=True,
                          image_b64=base64.b64encode(png).decode("ascii")))
     return out
+
+
+def _parse_argb(text: str | None) -> list[float] | None:
+    """"ffd80016" (AARRGGBB) または "d80016" (RRGGBB) を 0〜1 の RGB にする。"""
+    if not text:
+        return None
+    h = text.strip().lstrip("#")
+    if len(h) == 8:
+        h = h[2:]
+    if len(h) != 6:
+        return None
+    try:
+        return [int(h[k:k + 2], 16) / 255 for k in (0, 2, 4)]
+    except ValueError:
+        return None
 
 
 def random_tilt(max_deg: float) -> float:

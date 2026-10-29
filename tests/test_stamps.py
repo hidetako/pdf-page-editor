@@ -59,6 +59,23 @@ def main():
     assert (out_pix.width, out_pix.height, out_pix.n) == (src_pix.width, src_pix.height, 4)
     sa = np.frombuffer(src_pix.samples, np.uint8).astype(int); oa = np.frombuffer(out_pix.samples, np.uint8).astype(int)
     assert np.abs(sa - oa).max() <= 2, "PNG 往復の丸め以上の差がある"
+    # 画像印の塗り直し: 赤い丸の画像を青で描くと赤は消え、白地は透明のまま
+    s_blue = Stamp(kind="image", image_b64=s_img.image_b64, size_mm=20, color=[0.1, 0.2, 0.9], recolor=True)
+    bp = fitz.Pixmap(render_png(s_blue, dpi=150))
+    ba = np.frombuffer(bp.samples, dtype=np.uint8).reshape(bp.height, bp.width, 4)
+    assert ba[2, 2, 3] == 0, "白地は透明"
+    inked = ba[:, :, 3] > 120
+    af = ba[inked][:, 3].astype(float)
+    assert inked.sum() > 100 and (ba[inked][:, 2] / af > 0.8).all() and (ba[inked][:, 0] / af < 0.2).all(), "インク部分は青"
+    # 白地透過で alpha を下げた縁のピクセルは RGB <= alpha（事前乗算）になっていて色が壊れない
+    sa = np.frombuffer(src_pix.samples, dtype=np.uint8).reshape(src_pix.height, src_pix.width, 4)
+    assert (sa[:, :, :3].max(axis=2) <= sa[:, :, 3]).all(), "RGB > alpha のピクセルがある"
+    try:
+        red_bbox(bp); raise AssertionError("赤が残っている")
+    except AssertionError as e:
+        assert "朱色" in str(e)
+    assert fitz.Pixmap(render_png(s_blue, dpi=150, opacity=0.5)).width == bp.width, "加工ありでも塗り直しが効く"
+    assert Stamp.from_dict({"name": "old", "kind": "image"}).recolor is False, "旧データは塗り直しなし"
     # 傾き・不透明度・かすれを付けたときは従来どおり描画でき、解像度も元画像以上
     assert fitz.Pixmap(render_png(s_big, dpi=150, opacity=0.5)).width == 800
     assert fitz.Pixmap(render_png(s_big, dpi=150, tilt_deg=7)).width > 800
@@ -92,12 +109,24 @@ def main():
     assert lib3.import_file(ent) == 2 and len(lib3.stamps) == n3 + 2
     s1, s2 = lib3.stamps[-2:]
     assert s1.name == "安藤印 1" and s2.name == "安藤印 2" and s1.kind == s2.kind == "image" and s1.size_mm == 15
+    assert s1.recolor and [round(c * 255) for c in s1.color] == [0xD8, 0x00, 0x16], "col 属性が印色になる"
+    assert s2.recolor and s2.color == list(default_stamps()[0].color), "col なしは既定の朱色"
+    # グレーのマスク画像でも col の色で描かれる（元ソフトと同じ見え方）
+    ga0 = np.zeros((40, 40, 2), dtype=np.uint8); ga0[10:30, 10:30, 1] = 255  # 中央だけ黒・不透明（グレー+alpha）
+    gray = fitz.Pixmap(fitz.csGRAY, 40, 40, ga0.tobytes(), True)
+    ent2 = os.path.join(tmp, "gray.entstmp")
+    with open(ent2, "w", encoding="utf-8") as f:
+        f.write(f'<ENTSTMP><stampEntities><stampEntity class="ScannerStamp" col="ff0000ff" image="{base64.b64encode(gray.tobytes("png")).decode()}" /></stampEntities></ENTSTMP>')
+    assert lib3.import_file(ent2) == 1
+    gp = fitz.Pixmap(render_png(lib3.stamps[-1], dpi=150))
+    ga = np.frombuffer(gp.samples, dtype=np.uint8).reshape(gp.height, gp.width, 4)
+    assert ga[2, 2, 3] == 0 and ga[20, 20, 3] > 250 and ga[20, 20, 2] > 250 and ga[20, 20, 0] < 5, "中央は青・外は透明"
     p1 = fitz.Pixmap(base64.b64decode(s1.image_b64))
     assert p1.alpha, "不透過 PNG は白地を透過して取り込む"
     a1 = np.frombuffer(p1.samples, dtype=np.uint8).reshape(p1.height, p1.width, 4)
     assert a1[2, 2, 3] == 0 and a1[:, :, 3].max() > 200
     assert fitz.Pixmap(render_png(s1, dpi=200)).width > 10, "押印用に描画できる"
-    assert StampLibrary(os.path.join(tmp, "stamps3.json")).stamps[-1].name == "安藤印 2", "保存されている"
+    assert StampLibrary(os.path.join(tmp, "stamps3.json")).stamps[-1].name == "gray", "保存されている"
     bad = os.path.join(tmp, "bad.entstmp")
     with open(bad, "w", encoding="utf-8") as f:
         f.write('<ENTSTMP><stampEntities><stampEntity class="TextStamp" text="承認" /></stampEntities></ENTSTMP>')
