@@ -416,7 +416,8 @@ def main():
     win.model.close(); win.refresh_thumbs(); wait()
     assert win.thumbs.count() == 0 and "ドラッグ" in win.view.text()
     drop([a, b, img]); wait(150)
-    assert win.model.path == a and win.model.page_count == 8
+    # Windows では QUrl 経由のパスが C:/... 表記になるので、文字列ではなく同一ファイルかで比較する
+    assert os.path.samefile(win.model.path, a) and win.model.page_count == 8
     assert [p.get_text().strip() for p in win.model.doc] == ["A-1", "A-2", "A-3", "A-4", "A-5", "B-1", "B-2", ""]
     assert win.model.modified, "挿入したので未保存状態"
     shot(win, "dropped")
@@ -439,7 +440,7 @@ def main():
     QMessageBox.question = staticmethod(lambda *a_, **k: asked.append(1) or QMessageBox.Cancel)
     win3 = MainWindow(); win3.show(); wait(50)
     win3.open_file(a); win3.open_file(b)
-    assert not asked and win3.model.path == b
+    assert not asked and os.path.samefile(win3.model.path, b)
     assert win3.close()
 
     print(f"GUI E2E: {_step[0]} steps passed  (tmp={_TMP})")
