@@ -20,6 +20,7 @@ import pymupdf as fitz
 MM = 72 / 25.4
 FONT = "japan"
 SHU = [0.86, 0.13, 0.13]  # 朱色
+MAX_IMAGE_PX = 4000       # 画像印を描画する最大ピクセル幅
 
 KINDS = {
     "mitome": "認印・三文判（丸・縦書き）",
@@ -193,11 +194,14 @@ def render_png(stamp: Stamp, dpi: int = 600, date: _dt.date | None = None,
     date = date or _dt.date.today()
     w, h = stamp.size_pt()
     scale = dpi / 72
-    mat = fitz.Matrix(scale, scale).prerotate(tilt_deg)
     if stamp.kind == "image":
         if not stamp.image_b64:
             raise ValueError("画像が設定されていません。")
         src = fitz.Pixmap(base64.b64decode(stamp.image_b64))
+        # 元画像の解像度を下回らないようにする（小さい押印サイズでもぼやけない）。上限 4000px
+        scale = min(max(scale, src.width / (w or 1)), MAX_IMAGE_PX / (w or 1))
+    mat = fitz.Matrix(scale, scale).prerotate(tilt_deg)
+    if stamp.kind == "image":
         doc = fitz.open()
         page = doc.new_page(width=w, height=h)
         page.insert_image(page.rect, pixmap=src)

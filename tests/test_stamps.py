@@ -10,7 +10,7 @@ import numpy as np
 import pymupdf as fitz
 
 from pdfmodel import PdfModel
-from stamps import (Stamp, StampLibrary, default_stamps, format_date, image_to_stamp_png, render_png)
+from stamps import (MM, Stamp, StampLibrary, default_stamps, format_date, image_to_stamp_png, render_png)
 
 
 def red_bbox(pix):
@@ -47,6 +47,14 @@ def main():
     import base64
     s_img = Stamp(name="scan", kind="image", image_b64=base64.b64encode(image_to_stamp_png(img)).decode(), size_mm=20)
     assert fitz.Pixmap(render_png(s_img, dpi=200)).width > 10
+    # 画像印は元画像の解像度を下回らない（15mm・150dpi なら本来 89px だが、800px の元画像なら 800px で描く）
+    big = os.path.join(tmp, "big.png")
+    fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 800, 800), 1).save(big)
+    s_big = Stamp(kind="image", image_b64=base64.b64encode(open(big, "rb").read()).decode(), size_mm=15)
+    assert fitz.Pixmap(render_png(s_big, dpi=150)).width == 800
+    assert fitz.Pixmap(render_png(s_big, dpi=600)).width == 800
+    s_small = Stamp(kind="image", image_b64=s_img.image_b64, size_mm=100)  # 200px の元画像を 100mm で: dpi 側が勝つ
+    assert abs(fitz.Pixmap(render_png(s_small, dpi=150)).width - 100 * MM * 150 / 72) <= 1
 
     # ライブラリの保存/読込/インポート
     lib = StampLibrary(os.path.join(tmp, "stamps.json"))
