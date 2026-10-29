@@ -241,7 +241,8 @@ class MainWindow(QMainWindow):
         a_dock = act("印鑑パネルを表示", lambda on: self.stamp_dock.setVisible(on), None, smenu, toolbar=False, tip="右側の電子印鑑パネルの表示/非表示")
         a_dock.setCheckable(True); a_dock.setChecked(True)
         self.stamp_dock.visibilityChanged.connect(a_dock.setChecked)
-        act("キャンセル（押印モード終了）", lambda: self._set_stamp_mode(False), "Esc", None, toolbar=False)
+        # メニュー/ツールバーに載せないアクションは、ウィンドウに addAction しないとショートカットが効かない
+        self.addAction(act("キャンセル（押印モード終了）", lambda: self._set_stamp_mode(False), "Esc", None, toolbar=False))
 
         tb.addSeparator()
         act("縮小", lambda: self.zoom_step(-1), "Ctrl+-", vmenu, icon="zoom-out", tip="表示を縮小。Ctrl+マウスホイールでも可")
@@ -611,6 +612,7 @@ class MainWindow(QMainWindow):
             self.open_file(pdfs[0])
             rest = pdfs[1:] + imgs
             if rest:
+                self.thumbs.clearSelection()  # 開いた直後は 1 ページ目が選択されているので、残りは末尾に連結する
                 self.insert_files(rest)
         else:
             self.insert_files(pdfs + imgs)

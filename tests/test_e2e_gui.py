@@ -1,0 +1,449 @@
+"""GUI の E2E テスト（オフスクリーン）。python tests/test_e2e_gui.py で実行可。
+
+実際の MainWindow を起動し、QAction・マウス・キー操作で一連の業務フロー
+（開く → 閲覧 → ページ編集 → 押印 → 保存/抽出 → 終了確認）を通す。
+ファイル選択・確認ダイアログだけ差し替え、それ以外は本番コードを通す。
+環境変数 E2E_SHOTS にディレクトリを指定すると各段階のスクリーンショットを保存する。
+"""
+import os
+import sys
+import tempfile
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+_TMP = tempfile.mkdtemp(prefix="pdfpe_e2e_")
+os.environ["APPDATA"] = os.path.join(_TMP, "appdata")  # 印鑑ライブラリを隔離
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+import numpy as np
+import pymupdf as fitz
+from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QUrl, Qt
+from PySide6.QtGui import QDropEvent, QWheelEvent
+from PySide6.QtTest import QTest
+from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
+
+import app as appmod
+import stamp_ui
+from app import MainWindow
+
+SHOTS = os.environ.get("E2E_SHOTS")
+_step = [0]
+
+
+def step(name):
+    _step[0] += 1
+    print(f"  [{_step[0]:02d}] {name}")
+
+
+def shot(win, name):
+    if SHOTS:
+        QApplication.processEvents()
+        win.grab().save(os.path.join(SHOTS, f"{_step[0]:02d}_{name}.png"))
+
+
+def make_pdf(path, n, label):
+    d = fitz.open()
+    for i in range(n):
+        p = d.new_page(width=595, height=842)
+        p.insert_text((72, 100), f"{label}-{i + 1}", fontsize=40)
+    d.save(path)
+    d.close()
+
+
+def texts(path):
+    d = fitz.open(path)
+    out = [p.get_text().strip() for p in d]
+    rots = [p.rotation for p in d]
+    d.close()
+    return out, rots
+
+
+def red_center(path, page=0, dpi=288):
+    """ページ上の朱色領域の中心と幅を pt で返す（細い枠線を拾うため高解像度で描画）。"""
+    pix = fitz.open(path)[page].get_pixmap(dpi=dpi)
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    m = (arr[:, :, 0] > 150) & (arr[:, :, 1] < 110) & (arr[:, :, 2] < 110)
+    ys, xs = np.where(m)
+    assert len(xs), "朱色が見つからない"
+    k = 72 / dpi
+    return (xs.min() + xs.max()) / 2 * k, (ys.min() + ys.max()) / 2 * k, (xs.max() - xs.min()) * k
+
+
+def wait(ms=50):
+    QTest.qWait(ms)
+
+
+def thumb_center(win, row):
+    r = win.thumbs.visualItemRect(win.thumbs.item(row))
+    return r.center()
+
+
+def main():
+    app = QApplication.instance() or QApplication(sys.argv)
+    a = os.path.join(_TMP, "a.pdf"); make_pdf(a, 5, "A")
+    b = os.path.join(_TMP, "b.pdf"); make_pdf(b, 2, "B")
+    img = os.path.join(_TMP, "img.png")
+    fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 200, 100), 0).save(img)
+    broken = os.path.join(_TMP, "broken.pdf")
+    with open(broken, "wb") as f:
+        f.write(b"not a pdf at all")
+    locked = os.path.join(_TMP, "locked.pdf")
+    d = fitz.open(); d.new_page(); d.save(locked, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="x", owner_pw="x"); d.close()
+
+    errors = []
+    QMessageBox.critical = staticmethod(lambda *args, **kw: errors.append(args[2]) or QMessageBox.Ok)
+    infos = []
+    QMessageBox.information = staticmethod(lambda *args, **kw: infos.append(args[2]) or QMessageBox.Ok)
+
+    win = MainWindow()
+    win.show()
+    wait(100)
+
+    # ---------------------------------------------------------------- 起動直後
+    step("起動: 文書なしでは編集系アクションが無効")
+    assert win.windowTitle() == appmod.APP_NAME
+    assert win.thumbs.count() == 0
+    for act in (win.a_save, win.a_saveas, win.a_insert, win.a_delete, win.a_rotl, win.a_rotr,
+                win.a_up, win.a_down, win.a_extract, win.a_undo, win.a_redo):
+        assert not act.isEnabled(), act.text()
+    assert win.a_open.isEnabled()
+    assert "ドラッグ" in win.view.text()
+    assert win.stamp_dock_widget.list.count() == 5, "既定の印鑑 5 種"
+    win.a_stamp.trigger()
+    assert not win.stamp_mode and not win.a_stamp.isChecked(), "文書なしでは押印モードに入れない"
+    shot(win, "empty")
+
+    # ---------------------------------------------------------------- 開く（エラー系）
+    step("開く: 壊れた PDF / パスワード付き PDF はエラー表示で継続")
+    QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (broken, ""))
+    win.a_open.trigger(); wait()
+    assert len(errors) == 1 and win.model.doc is None
+    QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (locked, ""))
+    win.a_open.trigger(); wait()
+    assert len(errors) == 2 and "パスワード" in errors[-1]
+    QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: ("", ""))
+    win.a_open.trigger(); wait()
+    assert len(errors) == 2, "キャンセルは何も起きない"
+
+    # ---------------------------------------------------------------- 開く（正常）
+    step("開く: Ctrl+O 相当で 5 ページを開き、サムネイル・タイトル・ステータスが更新")
+    QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (a, ""))
+    win.a_open.trigger(); wait(100)
+    assert win.model.page_count == 5 and win.thumbs.count() == 5
+    assert win.windowTitle() == f"a.pdf - {appmod.APP_NAME}"
+    assert win.current == 0 and win.thumbs.selected_indices() == [0]
+    assert win.page_label.text().startswith("ページ 1 / 5") and "幅合わせ" in win.page_label.text()
+    assert "210 x 297 mm" in win.page_label.text()
+    assert not win.view.pixmap().isNull() and win.view.text() == ""
+    for act in (win.a_save, win.a_saveas, win.a_insert, win.a_delete, win.a_rotl, win.a_rotr, win.a_up, win.a_down, win.a_extract):
+        assert act.isEnabled(), act.text()
+    assert not win.a_undo.isEnabled()
+    shot(win, "opened")
+
+    # ---------------------------------------------------------------- 閲覧
+    step("閲覧: PgDown/PgUp、サムネイルクリック、Ctrl+クリック複数選択")
+    QTest.keyClick(win, Qt.Key_PageDown); wait()
+    assert win.current == 1 and win.page_label.text().startswith("ページ 2 / 5")
+    QTest.keyClick(win, Qt.Key_PageUp); wait()
+    assert win.current == 0
+    win.goto(99); assert win.current == 4, "範囲外はクランプ"
+    win.goto(-5); assert win.current == 0
+    QTest.mouseClick(win.thumbs.viewport(), Qt.LeftButton, Qt.NoModifier, thumb_center(win, 2)); wait()
+    assert win.current == 2 and win.thumbs.selected_indices() == [2]
+    QTest.mouseClick(win.thumbs.viewport(), Qt.LeftButton, Qt.ControlModifier, thumb_center(win, 4)); wait()
+    assert win.thumbs.selected_indices() == [2, 4]
+    assert win.a_delete.isEnabled()
+
+    step("ズーム: 拡大/縮小/幅合わせ/100%/Ctrl+ホイール")
+    win.goto(0); wait()
+    fit_w = win.view.pixmap().width()
+    QTest.keyClick(win, Qt.Key_Equal, Qt.ControlModifier); wait()
+    assert not win.fit_width and "ズーム" in win.page_label.text() and "幅合わせ" not in win.page_label.text()
+    z1 = win.zoom
+    QTest.keyClick(win, Qt.Key_Minus, Qt.ControlModifier); wait()
+    assert win.zoom < z1
+    QTest.keyClick(win, Qt.Key_1, Qt.ControlModifier); wait()
+    assert win.zoom == 1.0 and "100%" in win.page_label.text()
+    assert abs(win.view.pixmap().width() / win.view.pixmap().devicePixelRatio() - 595) <= 1
+    ev = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120), Qt.NoButton,
+                     Qt.ControlModifier, Qt.NoScrollPhase, False)
+    QApplication.sendEvent(win, ev); wait()
+    assert win.zoom == 1.25, win.zoom
+    ev = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, -120), Qt.NoButton,
+                     Qt.ControlModifier, Qt.NoScrollPhase, False)
+    QApplication.sendEvent(win, ev); wait()
+    assert win.zoom == 1.0
+    QTest.keyClick(win, Qt.Key_0, Qt.ControlModifier); wait()
+    assert win.fit_width and win.view.pixmap().width() == fit_w
+    shot(win, "zoom_fit")
+
+    # ---------------------------------------------------------------- ページ編集
+    step("回転: 右回転 → 90°、タイトルに * 、ステータスに回転表示、サムネ横長")
+    win.goto(0); wait()
+    win.a_rotr.trigger(); wait()
+    assert win.model.doc[0].rotation == 90 and win.model.modified
+    assert win.windowTitle() == f"a.pdf * - {appmod.APP_NAME}"
+    assert "回転 90°" in win.page_label.text()
+    ic = win.thumbs.item(0).icon().pixmap(appmod.THUMB_W, appmod.THUMB_W * 2)
+    assert ic.width() > ic.height(), "回転後サムネイルは横長"
+    assert win.a_undo.isEnabled() and not win.a_redo.isEnabled()
+    win.a_rotl.trigger(); wait()
+    assert win.model.doc[0].rotation == 0
+    shot(win, "rotated")
+
+    step("削除: Delete キーで選択ページ削除、選択が次ページへ")
+    win.goto(1); wait()                     # A-2
+    QTest.keyClick(win, Qt.Key_Delete); wait()
+    assert win.model.page_count == 4 and win.thumbs.count() == 4
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-1", "A-3", "A-4", "A-5"]
+    assert win.current == 1 and win.page_label.text().startswith("ページ 2 / 4")
+
+    step("削除: 全選択して削除はエラーで拒否")
+    win.thumbs.selectAll(); wait()
+    assert win.thumbs.selected_indices() == [0, 1, 2, 3]
+    win.a_delete.trigger(); wait()
+    assert "全ページ" in errors[-1] and win.model.page_count == 4
+
+    step("移動: Ctrl+Down / Ctrl+Up で前後移動、選択が追従")
+    win.goto(0); wait()                     # A-1
+    QTest.keyClick(win, Qt.Key_Down, Qt.ControlModifier); wait()
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-3", "A-1", "A-4", "A-5"]
+    assert win.thumbs.selected_indices() == [1] and win.current == 1
+    QTest.keyClick(win, Qt.Key_Up, Qt.ControlModifier); wait()
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-1", "A-3", "A-4", "A-5"]
+    assert win.current == 0
+    QTest.keyClick(win, Qt.Key_Up, Qt.ControlModifier); wait()
+    assert win.current == 0 and win.model.page_count == 4, "先頭ページの前移動は無視"
+
+    step("並べ替え: サムネイル内移動（ドロップ完了シグナル）→ モデルに反映")
+    # 内部 D&D のドロップ後状態（行の移動）を再現し、dropEvent が発火する order_changed を通す
+    m = win.thumbs.model()
+    win.thumbs.blockSignals(True)
+    assert m.moveRow(m.index(3, 0).parent(), 3, m.index(0, 0).parent(), 0)  # 末尾 A-5 を先頭へ
+    win.thumbs.blockSignals(False)
+    assert win.thumbs.current_order() == [3, 0, 1, 2]
+    win.thumbs.order_changed.emit(); wait()
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-5", "A-1", "A-3", "A-4"]
+    assert win.thumbs.current_order() == [0, 1, 2, 3], "リフレッシュ後は連番に戻る"
+    shot(win, "reordered")
+
+    step("元に戻す / やり直し: Ctrl+Z / Ctrl+Y、ボタン活性が追従")
+    QTest.keyClick(win, Qt.Key_Z, Qt.ControlModifier); wait()
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-1", "A-3", "A-4", "A-5"]
+    assert win.a_redo.isEnabled()
+    QTest.keyClick(win, Qt.Key_Y, Qt.ControlModifier); wait()
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-5", "A-1", "A-3", "A-4"]
+    assert not win.a_redo.isEnabled()
+    for _ in range(10):
+        win.a_undo.trigger(); wait(10)
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-1", "A-2", "A-3", "A-4", "A-5"]
+    assert not win.a_undo.isEnabled() and win.a_redo.isEnabled()
+    for _ in range(10):
+        win.a_redo.trigger(); wait(10)
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-5", "A-1", "A-3", "A-4"]
+    assert not win.a_redo.isEnabled()
+
+    step("挿入: Ctrl+I で PDF と画像を選択ページの後ろへ、挿入ページが選択される")
+    win.goto(0); wait()
+    QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([b, img], ""))
+    QTest.keyClick(win, Qt.Key_I, Qt.ControlModifier); wait(100)
+    assert win.model.page_count == 7
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-5", "B-1", "B-2", "", "A-1", "A-3", "A-4"]
+    assert win.thumbs.selected_indices() == [1, 2, 3] and win.current == 1
+    assert win.model.doc[3].rect.width > win.model.doc[3].rect.height, "画像ページは画像の縦横比"
+    QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([locked], ""))
+    win.a_insert.trigger(); wait()
+    assert "パスワード" in errors[-1] and win.model.page_count == 7
+    QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([], ""))
+    win.a_insert.trigger(); wait()
+    assert win.model.page_count == 7
+    shot(win, "inserted")
+
+    # ---------------------------------------------------------------- 電子印鑑
+    step("押印: F2 でモード ON、ゴースト表示、クリック位置に朱印、Esc で OFF")
+    win.goto(4); wait()                     # A-1
+    dock = win.stamp_dock_widget
+    dock.list.setCurrentRow(3)              # 「済」
+    assert dock.current_stamp().name == "済"
+    QTest.keyClick(win, Qt.Key_F2); wait()
+    assert win.stamp_mode and win.a_stamp.isChecked() and dock.btn_mode.isChecked()
+    assert win.view.stamp_mode and win.view.ghost is not None
+    assert "押印モード" in win.statusBar().currentMessage()
+    g = win.view.pix_geometry(); ox, oy, pw, ph = g
+    target = QPoint(int(ox + pw * 0.75), int(oy + ph * 0.25))
+    QTest.mouseMove(win.view, target); wait()
+    assert win.view.ghost_pos is not None, "マウス追従ゴースト"
+    shot(win, "stamp_ghost")
+    before_undo = len(win.model._undo)
+    QTest.mouseClick(win.view, Qt.LeftButton, Qt.NoModifier, target); wait(100)
+    assert len(win.model._undo) == before_undo + 1 and win.model.modified
+    assert "押印しました（ページ 5）" in win.statusBar().currentMessage()
+    assert win.stamp_mode, "連続押印のためモードは継続"
+    assert win.current == 4 and win.model.page_count == 7
+    # 余白クリック（ページ外）は押印しない
+    QTest.mouseClick(win.view, Qt.LeftButton, Qt.NoModifier, QPoint(2, 2)); wait()
+    assert len(win.model._undo) == before_undo + 1
+    shot(win, "stamped")
+    QTest.keyClick(win, Qt.Key_Escape); wait()
+    assert not win.stamp_mode and not win.a_stamp.isChecked() and not dock.btn_mode.isChecked()
+    assert win.view.ghost is None and win.view.cursor().shape() == Qt.ArrowCursor
+
+    step("押印: 印鑑パネルのボタンから ON/OFF、回転ページでも表示位置どおり")
+    win.goto(0); wait()
+    win.a_rotr.trigger(); wait()            # A-5 を 90° 回転
+    dock.btn_mode.click(); wait()
+    assert win.stamp_mode and win.a_stamp.isChecked()
+    g = win.view.pix_geometry(); ox, oy, pw, ph = g
+    QTest.mouseClick(win.view, Qt.LeftButton, Qt.NoModifier, QPoint(int(ox + pw * 0.25), int(oy + ph * 0.5))); wait(100)
+    dock.btn_mode.click(); wait()
+    assert not win.stamp_mode
+
+    step("押印設定: サイズ変更でゴーストが変わる、日付・不透明度・かすれ・傾きで描画可")
+    QTest.keyClick(win, Qt.Key_F2); wait()
+    g0 = win.view.ghost.width()
+    dock.sp_size.setValue(30); wait()
+    assert win.view.ghost.width() > g0 * 2
+    dock.sp_size.setValue(0); wait()
+    assert win.view.ghost.width() == g0
+    dock.sl_opacity.setValue(50); dock.sl_kasure.setValue(60); dock.sp_tilt.setValue(10); wait()
+    dock.list.setCurrentRow(1); wait()      # データネーム印（日付入り）
+    assert win.view.ghost is not None
+    win.goto(5); wait()                     # A-3
+    g = win.view.pix_geometry(); ox, oy, pw, ph = g
+    n0 = len(win.model._undo)
+    QTest.mouseClick(win.view, Qt.LeftButton, Qt.NoModifier, QPoint(int(ox + pw * 0.5), int(oy + ph * 0.5))); wait(100)
+    assert len(win.model._undo) == n0 + 1
+    dock.sl_opacity.setValue(100); dock.sl_kasure.setValue(0); dock.sp_tilt.setValue(0)
+    QTest.keyClick(win, Qt.Key_Escape); wait()
+
+    step("印鑑パネル: 新規 / 編集 / 複製 / 削除 / エクスポート / インポート / PNG 保存")
+    lib_path = dock.lib.path
+    assert lib_path.startswith(os.environ["APPDATA"]) and os.path.exists(lib_path)
+
+    def accept_dialog(self):  # 編集ダイアログ: 文字を変えて OK
+        self.ed_name.setText("E2E印"); self.ed_lines.setPlainText("検査"); self.sp_size.setValue(14)
+        return QDialog.Accepted
+    stamp_ui.StampEditDialog.exec = accept_dialog
+    n = dock.list.count()
+    dock.new_stamp(); wait()
+    assert dock.list.count() == n + 1 and dock.current_stamp().name == "E2E印" and dock.current_stamp().lines == ["検査"]
+    dock.edit_stamp(); wait()
+    assert dock.list.count() == n + 1 and dock.current_stamp().size_mm == 14
+    dock.dup_stamp(); wait()
+    assert dock.list.count() == n + 2 and dock.current_stamp().name == "E2E印 のコピー"
+    QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Yes)
+    dock.del_stamp(); wait()
+    assert dock.list.count() == n + 1
+    import json
+    with open(lib_path, encoding="utf-8") as f:
+        assert any(s["name"] == "E2E印" for s in json.load(f)["stamps"]), "ライブラリが保存されている"
+    exp = os.path.join(_TMP, "exp.json")
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (exp, ""))
+    dock.export_json(); wait()
+    assert os.path.exists(exp)
+    QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (exp, ""))
+    dock.import_json(); wait()
+    assert dock.list.count() == 2 * (n + 1) and infos and "件" in infos[-1]
+    png_out = os.path.join(_TMP, "stamp.png")
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (png_out, ""))
+    dock.list.setCurrentRow(0)
+    dock.export_png(); wait()
+    pm = fitz.Pixmap(png_out)
+    assert pm.alpha and pm.width > 100, "透過 PNG が書き出される"
+    # 画像から印鑑（白地透過）
+    QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (img, ""))
+    QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Yes)
+    stamp_ui.StampEditDialog.exec = lambda self: QDialog.Accepted
+    n2 = dock.list.count()
+    dock.from_image(); wait()
+    assert dock.list.count() == n2 + 1 and dock.current_stamp().kind == "image"
+    QTest.keyClick(win, Qt.Key_F2); wait()
+    assert win.stamp_mode and win.view.ghost is not None, "画像印でもゴーストが出る"
+    QTest.keyClick(win, Qt.Key_Escape); wait()
+    shot(win, "stamp_panel")
+
+    # ---------------------------------------------------------------- 保存・抽出
+    step("抽出: 選択 2 ページだけ別 PDF へ、元文書は不変")
+    win.goto(0); wait()
+    QTest.mouseClick(win.thumbs.viewport(), Qt.LeftButton, Qt.ControlModifier, thumb_center(win, 4)); wait()
+    assert win.thumbs.selected_indices() == [0, 4]
+    ex = os.path.join(_TMP, "ex")       # 拡張子なし → .pdf が補われる
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (ex, ""))
+    win.a_extract.trigger(); wait()
+    assert os.path.exists(ex + ".pdf")
+    t, r = texts(ex + ".pdf")
+    assert t == ["A-5", "A-1"] and r == [90, 0], (t, r)
+    assert win.model.page_count == 7 and "2 ページを抽出" in win.statusBar().currentMessage()
+    assert red_center(ex + ".pdf", 1)[2] > 10, "抽出ページに押印が残る"
+
+    step("名前を付けて保存: Ctrl+Shift+S、タイトル更新、押印位置・順序・回転が保存される")
+    out = os.path.join(_TMP, "out.pdf")
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (out, ""))
+    QTest.keyClick(win, Qt.Key_S, Qt.ControlModifier | Qt.ShiftModifier); wait(100)
+    assert os.path.exists(out) and not win.model.modified
+    assert win.windowTitle() == f"out.pdf - {appmod.APP_NAME}"
+    assert "保存しました" in win.statusBar().currentMessage()
+    t, r = texts(out)
+    assert t == ["A-5", "B-1", "B-2", "", "A-1", "A-3", "A-4"], t
+    assert r == [90, 0, 0, 0, 0, 0, 0], r
+    cx, cy, w = red_center(out, 4)        # A-1 の押印: 幅 75% / 高さ 25% の位置
+    assert abs(cx - 595 * 0.75) < 6 and abs(cy - 842 * 0.25) < 6, (cx, cy)
+    assert 20 < w < 40, w                 # 済 10mm ≒ 28pt
+    cx, cy, w = red_center(out, 0)        # 回転ページ A-5: 表示上 (25%, 50%)
+    assert abs(cx - 842 * 0.25) < 6 and abs(cy - 595 * 0.5) < 6, (cx, cy)
+    t0, _ = texts(a)
+    assert t0 == ["A-1", "A-2", "A-3", "A-4", "A-5"], "元ファイルは未変更"
+    shot(win, "saved")
+
+    step("上書き保存: Ctrl+S で現在のパスへ、* が消える。未保存の新規文書は名前を付けて保存へ")
+    win.goto(1); win.a_rotr.trigger(); wait()
+    assert win.model.modified and " * " in win.windowTitle()
+    QTest.keyClick(win, Qt.Key_S, Qt.ControlModifier); wait(100)
+    assert not win.model.modified and win.windowTitle() == f"out.pdf - {appmod.APP_NAME}"
+    assert texts(out)[1][1] == 90
+    assert fitz.open(out).page_count == 7
+
+    # ---------------------------------------------------------------- ファイル D&D
+    step("ファイルの D&D: 文書ありなら挿入、文書なしなら 1 つ目を開き残りを挿入")
+    def drop(paths):
+        md = QMimeData(); md.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        ev = QDropEvent(QPointF(100, 100), Qt.CopyAction, md, Qt.LeftButton, Qt.NoModifier, QEvent.Drop)
+        win.dropEvent(ev)
+    win.goto(6); wait()
+    drop([img]); wait(100)
+    assert win.model.page_count == 8 and win.thumbs.selected_indices() == [7]
+    # 文書を閉じた状態での D&D（破棄確認は Discard）
+    QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Discard)
+    win.model.close(); win.refresh_thumbs(); wait()
+    assert win.thumbs.count() == 0 and "ドラッグ" in win.view.text()
+    drop([a, b, img]); wait(150)
+    assert win.model.path == a and win.model.page_count == 8
+    assert [p.get_text().strip() for p in win.model.doc] == ["A-1", "A-2", "A-3", "A-4", "A-5", "B-1", "B-2", ""]
+    assert win.model.modified, "挿入したので未保存状態"
+    shot(win, "dropped")
+
+    # ---------------------------------------------------------------- 終了確認
+    step("終了確認: 変更ありで Cancel → 開いたまま、Save → 保存して終了、Discard → 終了")
+    QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Cancel)
+    assert not win.close() and win.isVisible()
+    QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Save)
+    assert win.close() and not win.isVisible()
+    assert texts(a)[0] == ["A-1", "A-2", "A-3", "A-4", "A-5", "B-1", "B-2", ""], "Save で元ファイルに保存"
+    win2 = MainWindow(); win2.show(); wait(50)
+    win2.open_file(b); win2.a_rotr.trigger(); wait()
+    QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Discard)
+    assert win2.close()
+    assert texts(b)[1] == [0, 0], "Discard では保存されない"
+
+    step("変更なしで開き直し: 確認ダイアログは出ない")
+    asked = []
+    QMessageBox.question = staticmethod(lambda *a_, **k: asked.append(1) or QMessageBox.Cancel)
+    win3 = MainWindow(); win3.show(); wait(50)
+    win3.open_file(a); win3.open_file(b)
+    assert not asked and win3.model.path == b
+    assert win3.close()
+
+    print(f"GUI E2E: {_step[0]} steps passed  (tmp={_TMP})")
+
+
+if __name__ == "__main__":
+    main()

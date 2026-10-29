@@ -41,6 +41,7 @@ SmartScreen の警告は未署名 exe のため。「詳細情報」→「実行
 - `stamp_ui.py` : 印鑑パネルと印鑑編集ダイアログ
 - `app.py`      : PySide6 GUI 本体
 - `tests/test_model.py`, `tests/test_stamps.py` : 自動テスト（直接実行）
+- `tests/test_e2e_gui.py` : GUI の E2E テスト（オフスクリーンで実際の画面を操作。`E2E_SHOTS=出力先` で各段階のスクリーンショットを保存）
 
 ## ライセンス注意
 PyMuPDF は AGPL-3.0 のため、本アプリを配布する場合はソース公開義務が生じる（社内利用・個人利用なら問題なし）。
