@@ -12,6 +12,7 @@ import tempfile
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _TMP = tempfile.mkdtemp(prefix="pdfpe_e2e_")
 os.environ["APPDATA"] = os.path.join(_TMP, "appdata")  # 印鑑ライブラリを隔離
+os.environ["XDG_CONFIG_HOME"] = os.path.join(_TMP, "xdg")  # QSettings (Linux) を隔離
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -489,6 +490,21 @@ def main():
     QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Discard)
     assert win2.close()
     assert texts(b)[1] == [0, 0], "Discard では保存されない"
+
+    step("ツールバー: 左辺へ移動して閉じると、次回起動時に位置が復元される")
+    from PySide6.QtCore import QSettings
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, os.path.join(_TMP, "qsettings"))
+    w4 = MainWindow(); w4.show(); wait(50)
+    assert w4.toolbar.isMovable() and w4.toolBarArea(w4.toolbar) == Qt.TopToolBarArea
+    w4.addToolBar(Qt.LeftToolBarArea, w4.toolbar); wait()
+    assert w4.toolBarArea(w4.toolbar) == Qt.LeftToolBarArea
+    w4.stamp_dock.hide()
+    assert w4.close()
+    w5 = MainWindow(); w5.show(); wait(50)
+    assert w5.toolBarArea(w5.toolbar) == Qt.LeftToolBarArea, "ツールバー位置が復元される"
+    assert not w5.stamp_dock.isVisible(), "印鑑パネルの表示状態も復元される"
+    w5.addToolBar(Qt.TopToolBarArea, w5.toolbar); w5.stamp_dock.show(); assert w5.close()
 
     step("変更なしで開き直し: 確認ダイアログは出ない")
     asked = []

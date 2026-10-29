@@ -8,7 +8,7 @@ import os
 import sys
 
 import pymupdf as fitz
-from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QDragEnterEvent, QDropEvent, QIcon, QImage,
                            QKeySequence, QPainter, QPixmap)
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QLabel, QListWidget,
@@ -158,6 +158,7 @@ class MainWindow(QMainWindow):
         self.setAcceptDrops(True)
         self._build_ui()
         self._update_actions()
+        self._restore_layout()
 
     # ------------------------------------------------------------ UI
     def _build_ui(self):
@@ -204,9 +205,13 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.page_label)
 
         tb = QToolBar("メイン")
+        tb.setObjectName("mainToolBar")
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        tb.setMovable(False)
+        tb.setMovable(True)   # 左端のグリップをドラッグして上下左右の辺に移動できる
+        tb.setAllowedAreas(Qt.AllToolBarAreas)
+        tb.setToolTip("左端をドラッグすると上下左右の辺に移動できます")
         self.addToolBar(tb)
+        self.toolbar = tb
         fmenu = self.menuBar().addMenu("ファイル(&F)")
         emenu = self.menuBar().addMenu("編集(&E)")
         vmenu = self.menuBar().addMenu("表示(&V)")
@@ -307,9 +312,28 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self._confirm_discard():
+            self._save_layout()
             event.accept()
         else:
             event.ignore()
+
+    # ------------------------------------------------------------ レイアウトの保存/復元
+    def _settings(self) -> QSettings:
+        return QSettings("PdfPageEditor", "PdfPageEditor")
+
+    def _save_layout(self):
+        s = self._settings()
+        s.setValue("geometry", self.saveGeometry())
+        s.setValue("state", self.saveState())   # ツールバーの位置・ドックの表示状態
+
+    def _restore_layout(self):
+        s = self._settings()
+        g = s.value("geometry")
+        if g is not None:
+            self.restoreGeometry(g)
+        st = s.value("state")
+        if st is not None:
+            self.restoreState(st)
 
     def _error(self, e: Exception):
         QMessageBox.critical(self, APP_NAME, f"エラー: {e}")
