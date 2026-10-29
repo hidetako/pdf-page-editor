@@ -1,4 +1,5 @@
 """印影生成と押印のテスト。python tests/test_stamps.py"""
+import base64
 import datetime
 import os
 import sys
@@ -55,6 +56,38 @@ def main():
     assert len(lib2.stamps) == n0 + 1 and lib2.stamps[-1].name == "x"
     lib2.export(os.path.join(tmp, "exp.json"))
     assert lib2.import_file(os.path.join(tmp, "exp.json")) == n0 + 1
+
+    # おまかせ電子印鑑 (.entstmp) のインポート: XML の image 属性 (base64 PNG) を画像印として取り込む
+    scan_png = fitz.open(img).convert_to_pdf()  # ダミー: 不透過の PNG を作る
+    pix = fitz.open("pdf", scan_png)[0].get_pixmap(dpi=72)
+    opaque = pix.tobytes("png"); assert not fitz.Pixmap(opaque).alpha
+    alpha_png = image_to_stamp_png(img)
+    ent = os.path.join(tmp, "安藤印.entstmp")
+    with open(ent, "w", encoding="utf-8-sig") as f:
+        f.write('<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
+                '<ENTSTMP product="EntrustStampForBusiness" version="1.0.2">\n  <stampEntities>\n'
+                f'    <stampEntity class="ScannerStamp" text="" col="ffd80016" image="{base64.b64encode(opaque).decode()}" chromakey="0">\n'
+                '      <transforms />\n    </stampEntity>\n'
+                f'    <stampEntity class="ScannerStamp" image="{base64.b64encode(alpha_png).decode()}" />\n'
+                '  </stampEntities>\n</ENTSTMP>\n')
+    lib3 = StampLibrary(os.path.join(tmp, "stamps3.json"))
+    n3 = len(lib3.stamps)
+    assert lib3.import_file(ent) == 2 and len(lib3.stamps) == n3 + 2
+    s1, s2 = lib3.stamps[-2:]
+    assert s1.name == "安藤印 1" and s2.name == "安藤印 2" and s1.kind == s2.kind == "image" and s1.size_mm == 15
+    p1 = fitz.Pixmap(base64.b64decode(s1.image_b64))
+    assert p1.alpha, "不透過 PNG は白地を透過して取り込む"
+    a1 = np.frombuffer(p1.samples, dtype=np.uint8).reshape(p1.height, p1.width, 4)
+    assert a1[2, 2, 3] == 0 and a1[:, :, 3].max() > 200
+    assert fitz.Pixmap(render_png(s1, dpi=200)).width > 10, "押印用に描画できる"
+    assert StampLibrary(os.path.join(tmp, "stamps3.json")).stamps[-1].name == "安藤印 2", "保存されている"
+    bad = os.path.join(tmp, "bad.entstmp")
+    with open(bad, "w", encoding="utf-8") as f:
+        f.write('<ENTSTMP><stampEntities><stampEntity class="TextStamp" text="承認" /></stampEntities></ENTSTMP>')
+    try:
+        lib3.import_file(bad); raise AssertionError("画像なしが通ってしまった")
+    except ValueError as e:
+        assert "文字だけ" in str(e)
 
     # 押印: 回転ページでも表示座標どおりの位置に正立で入る
     for rot in (0, 90, 270):

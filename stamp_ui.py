@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import datetime as _dt
 
 import pymupdf as fitz
@@ -179,7 +180,7 @@ class StampDock(QWidget):
             ("削除", self.del_stamp, "選択中の印鑑を一覧から削除"),
             ("画像から", self.from_image, "スキャンした印影や手書きサインの画像を読み込んで印鑑にする（白地は自動で透過）"),
             ("PNG保存", self.export_png, "選択中の印影を透過 PNG 画像として保存（Excel や Word に貼る用）"),
-            ("インポート", self.import_json, "エクスポートした印鑑データ(JSON)を読み込む。別 PC からの移行用"),
+            ("インポート", self.import_json, "印鑑データを読み込む。本アプリの JSON のほか、おまかせ電子印鑑の .entstmp も可（複数選択可）"),
             ("エクスポート", self.export_json, "印鑑データを JSON ファイルに書き出す（バックアップ・別 PC への移行用）"),
         ]
         for i, (t, fn, tip) in enumerate(btns):
@@ -282,13 +283,24 @@ class StampDock(QWidget):
             QMessageBox.critical(self, "エラー", str(e))
 
     def import_json(self):
-        path, _ = QFileDialog.getOpenFileName(self, "印鑑データをインポート", "", "JSON (*.json)")
-        if path:
+        paths, _ = QFileDialog.getOpenFileNames(
+            self, "印鑑データをインポート", "",
+            "印鑑データ (*.json *.entstmp);;本アプリの JSON (*.json);;おまかせ電子印鑑 (*.entstmp)")
+        if not paths:
+            return
+        n, failed = 0, []
+        for path in paths:
             try:
-                n = self.lib.import_file(path)
+                n += self.lib.import_file(path)
             except Exception as e:
-                QMessageBox.critical(self, "エラー", str(e)); return
-            self.refresh(); QMessageBox.information(self, "インポート", f"{n} 件を取り込みました。")
+                failed.append(f"{os.path.basename(path)}: {e}")
+        self.refresh()
+        msg = f"{n} 件を取り込みました。"
+        if any(p.lower().endswith(".entstmp") for p in paths):
+            msg += "\n.entstmp には大きさが記録されていないため 15 mm で登録しました。「編集」で直せます。"
+        if failed:
+            msg += "\n\n読み込めなかったファイル:\n" + "\n".join(failed)
+        QMessageBox.information(self, "インポート", msg)
 
     def export_json(self):
         path, _ = QFileDialog.getSaveFileName(self, "印鑑データをエクスポート", "stamps.json", "JSON (*.json)")

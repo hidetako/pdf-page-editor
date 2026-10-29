@@ -230,8 +230,8 @@ def _post_process(pix: fitz.Pixmap, opacity: float, kasure: float, seed: int | N
     return fitz.Pixmap(fitz.csRGB, pix.width, pix.height, out.tobytes(), True)
 
 
-def image_to_stamp_png(path: str, knockout_white: bool = True, threshold: int = 200) -> bytes:
-    """スキャン画像などから印影 PNG を作る。白地を透過し、朱色成分を残す。"""
+def image_to_stamp_png(path: str | bytes, knockout_white: bool = True, threshold: int = 200) -> bytes:
+    """スキャン画像などから印影 PNG を作る。白地を透過し、朱色成分を残す。path は画像データ (bytes) でも可。"""
     pix = fitz.Pixmap(path)
     if pix.n - pix.alpha != 3:
         pix = fitz.Pixmap(fitz.csRGB, pix)
@@ -292,9 +292,13 @@ class StampLibrary:
             json.dump({"version": 1, "stamps": [s.to_dict() for s in (stamps or self.stamps)]}, f, ensure_ascii=False, indent=2)
 
     def import_file(self, path: str) -> int:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        items = data.get("stamps", data if isinstance(data, list) else [])
+        """本アプリの JSON、または「おまかせ電子印鑑 for Business」の .entstmp を取り込む。"""
+        if os.path.splitext(path)[1].lower() == ".entstmp":
+            items = [s.to_dict() for s in import_entstmp(path)]
+        else:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            items = data.get("stamps", data if isinstance(data, list) else [])
         ids = {s.id for s in self.stamps}
         n = 0
         for d in items:
@@ -305,6 +309,34 @@ class StampLibrary:
             n += 1
         self.save()
         return n
+
+
+def import_entstmp(path: str, size_mm: float = 15.0) -> list[Stamp]:
+    """「おまかせ電子印鑑 for Business」(EntrustStampForBusiness) の .entstmp を読む。
+
+    実体は UTF-8 の XML で、<stampEntity image="base64 PNG" ...> が印影。
+    物理サイズは記録されていないため size_mm は既定値を入れ、後から編集してもらう。
+    画像にアルファが無ければ白地を透過する。文字だけの印鑑（image 属性なし）は対象外。
+    """
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(path)
+    root = tree.getroot()
+    if root.tag != "ENTSTMP":
+        raise ValueError("おまかせ電子印鑑の印影ファイル (.entstmp) ではありません。")
+    base = os.path.splitext(os.path.basename(path))[0]
+    entities = [e for e in root.iter("stampEntity") if e.get("image")]
+    if not entities:
+        raise ValueError("画像の印影が含まれていません（文字だけの印鑑は未対応）。")
+    out = []
+    for i, e in enumerate(entities):
+        png = base64.b64decode(e.get("image"))
+        pix = fitz.Pixmap(png)
+        if not pix.alpha:
+            png = image_to_stamp_png(png)
+        name = base if len(entities) == 1 else f"{base} {i + 1}"
+        out.append(Stamp(name=name, kind="image", lines=[], size_mm=size_mm,
+                         image_b64=base64.b64encode(png).decode("ascii")))
+    return out
 
 
 def random_tilt(max_deg: float) -> float:

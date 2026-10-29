@@ -340,9 +340,20 @@ def main():
     QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (exp, ""))
     dock.export_json(); wait()
     assert os.path.exists(exp)
-    QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (exp, ""))
+    QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([exp], ""))
     dock.import_json(); wait()
     assert dock.list.count() == 2 * (n + 1) and infos and "件" in infos[-1]
+    # おまかせ電子印鑑 (.entstmp) と壊れたファイルをまとめてインポート → 1 件取り込み + 失敗一覧
+    ent = os.path.join(_TMP, "安藤印.entstmp")
+    with open(ent, "w", encoding="utf-8-sig") as f:
+        f.write('<?xml version="1.0" encoding="utf-8"?><ENTSTMP product="EntrustStampForBusiness" version="1.0.2"><stampEntities>'
+                f'<stampEntity class="ScannerStamp" image="{__import__("base64").b64encode(open(img, "rb").read()).decode()}" />'
+                '</stampEntities></ENTSTMP>')
+    QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([ent, broken], ""))
+    n_before = dock.list.count()
+    dock.import_json(); wait()
+    assert dock.list.count() == n_before + 1 and dock.lib.stamps[-1].name == "安藤印" and dock.lib.stamps[-1].kind == "image"
+    assert "1 件" in infos[-1] and "15 mm" in infos[-1] and "broken.pdf" in infos[-1], infos[-1]
     png_out = os.path.join(_TMP, "stamp.png")
     QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (png_out, ""))
     dock.list.setCurrentRow(0)
