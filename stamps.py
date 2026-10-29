@@ -198,6 +198,9 @@ def render_png(stamp: Stamp, dpi: int = 600, date: _dt.date | None = None,
         if not stamp.image_b64:
             raise ValueError("画像が設定されていません。")
         src = fitz.Pixmap(base64.b64decode(stamp.image_b64))
+        if tilt_deg == 0 and opacity >= 1.0 and kasure <= 0:
+            # 加工なしなら元画像のピクセルをそのまま使う（再サンプリングによるにじみを避ける）
+            return _as_rgba(src).tobytes("png")
         # 元画像の解像度を下回らないようにする（小さい押印サイズでもぼやけない）。上限 4000px
         scale = min(max(scale, src.width / (w or 1)), MAX_IMAGE_PX / (w or 1))
     mat = fitz.Matrix(scale, scale).prerotate(tilt_deg)
@@ -214,6 +217,15 @@ def render_png(stamp: Stamp, dpi: int = 600, date: _dt.date | None = None,
     if opacity < 1.0 or kasure > 0:
         pix = _post_process(pix, opacity, kasure, seed)
     return pix.tobytes("png")
+
+
+def _as_rgba(pix: fitz.Pixmap) -> fitz.Pixmap:
+    """RGB+alpha の Pixmap にそろえる（グレー・CMYK・アルファなしに対応）。"""
+    if pix.n - pix.alpha != 3:
+        pix = fitz.Pixmap(fitz.csRGB, pix)
+    if not pix.alpha:
+        pix = fitz.Pixmap(pix, 1)
+    return pix
 
 
 def _post_process(pix: fitz.Pixmap, opacity: float, kasure: float, seed: int | None) -> fitz.Pixmap:

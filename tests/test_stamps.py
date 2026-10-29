@@ -53,8 +53,17 @@ def main():
     s_big = Stamp(kind="image", image_b64=base64.b64encode(open(big, "rb").read()).decode(), size_mm=15)
     assert fitz.Pixmap(render_png(s_big, dpi=150)).width == 800
     assert fitz.Pixmap(render_png(s_big, dpi=600)).width == 800
-    s_small = Stamp(kind="image", image_b64=s_img.image_b64, size_mm=100)  # 200px の元画像を 100mm で: dpi 側が勝つ
-    assert abs(fitz.Pixmap(render_png(s_small, dpi=150)).width - 100 * MM * 150 / 72) <= 1
+    # 加工なしの画像印は元画像のピクセルがそのまま出る（再サンプリングなし）
+    src_pix = fitz.Pixmap(base64.b64decode(s_img.image_b64))
+    out_pix = fitz.Pixmap(render_png(s_img, dpi=150))
+    assert (out_pix.width, out_pix.height, out_pix.n) == (src_pix.width, src_pix.height, 4)
+    sa = np.frombuffer(src_pix.samples, np.uint8).astype(int); oa = np.frombuffer(out_pix.samples, np.uint8).astype(int)
+    assert np.abs(sa - oa).max() <= 2, "PNG 往復の丸め以上の差がある"
+    # 傾き・不透明度・かすれを付けたときは従来どおり描画でき、解像度も元画像以上
+    assert fitz.Pixmap(render_png(s_big, dpi=150, opacity=0.5)).width == 800
+    assert fitz.Pixmap(render_png(s_big, dpi=150, tilt_deg=7)).width > 800
+    s_small = Stamp(kind="image", image_b64=s_img.image_b64, size_mm=100)  # 200px の元画像を 100mm で加工あり: dpi 側が勝つ
+    assert abs(fitz.Pixmap(render_png(s_small, dpi=150, opacity=0.5)).width - 100 * MM * 150 / 72) <= 1
 
     # ライブラリの保存/読込/インポート
     lib = StampLibrary(os.path.join(tmp, "stamps.json"))
