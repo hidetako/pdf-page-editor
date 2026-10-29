@@ -209,7 +209,7 @@ class MainWindow(QMainWindow):
         tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
         tb.setMovable(True)   # 左端のグリップをドラッグして上下左右の辺に移動できる
         tb.setAllowedAreas(Qt.AllToolBarAreas)
-        tb.setToolTip("左端をドラッグすると上下左右の辺に移動できます")
+        tb.setToolTip("右クリックで上下左右の辺に移動できます（左端のドラッグでも可）")
         self.addToolBar(tb)
         self.toolbar = tb
         fmenu = self.menuBar().addMenu("ファイル(&F)")
@@ -316,6 +316,22 @@ class MainWindow(QMainWindow):
             event.accept()
         else:
             event.ignore()
+
+    def createPopupMenu(self) -> QMenu:
+        """ツールバーやドックのタイトルを右クリックしたときのメニュー。ツールバーの置き場所を選べる。"""
+        menu = super().createPopupMenu() or QMenu(self)
+        menu.addSeparator()
+        cur = self.toolBarArea(self.toolbar)
+        for label, area in (("ツールバーを上へ", Qt.TopToolBarArea), ("ツールバーを下へ", Qt.BottomToolBarArea),
+                            ("ツールバーを左へ", Qt.LeftToolBarArea), ("ツールバーを右へ", Qt.RightToolBarArea)):
+            act = menu.addAction(label, lambda a=area: self.move_toolbar(a))
+            act.setCheckable(True)
+            act.setChecked(area == cur)
+        return menu
+
+    def move_toolbar(self, area):
+        self.addToolBar(area, self.toolbar)
+        self.toolbar.show()
 
     # ------------------------------------------------------------ レイアウトの保存/復元
     def _settings(self) -> QSettings:

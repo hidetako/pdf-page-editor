@@ -497,8 +497,18 @@ def main():
     QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, os.path.join(_TMP, "qsettings"))
     w4 = MainWindow(); w4.show(); wait(50)
     assert w4.toolbar.isMovable() and w4.toolBarArea(w4.toolbar) == Qt.TopToolBarArea
-    w4.addToolBar(Qt.LeftToolBarArea, w4.toolbar); wait()
-    assert w4.toolBarArea(w4.toolbar) == Qt.LeftToolBarArea
+    # 右クリックメニュー（createPopupMenu）に上下左右の項目があり、選ぶと移動する。現在位置にチェック
+    def popup_items(w):
+        return {x.text(): x for x in w.createPopupMenu().actions() if x.text().startswith("ツールバーを")}
+    items = popup_items(w4)
+    assert set(items) == {"ツールバーを上へ", "ツールバーを下へ", "ツールバーを左へ", "ツールバーを右へ"}
+    assert items["ツールバーを上へ"].isChecked() and not items["ツールバーを左へ"].isChecked()
+    items["ツールバーを左へ"].trigger(); wait()
+    assert w4.toolBarArea(w4.toolbar) == Qt.LeftToolBarArea and w4.toolbar.isVisible()
+    assert popup_items(w4)["ツールバーを左へ"].isChecked()
+    popup_items(w4)["ツールバーを右へ"].trigger(); wait()
+    assert w4.toolBarArea(w4.toolbar) == Qt.RightToolBarArea
+    popup_items(w4)["ツールバーを左へ"].trigger(); wait()
     w4.stamp_dock.hide()
     assert w4.close()
     w5 = MainWindow(); w5.show(); wait(50)
