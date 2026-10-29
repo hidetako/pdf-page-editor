@@ -163,6 +163,36 @@ def main():
         assert (x1 - x0) < 62 and (y1 - y0) < 62
         m.undo(); assert not m.can_undo() or True
         m.close()
+
+    # 押印の矩形は回転 0/90/180/270 のどのページでも表示座標で正しく求まる
+    png = render_png(Stamp(kind="user", lines=["済"], size_mm=20), dpi=300, date=d)
+    for rot in (0, 90, 180, 270):
+        m = PdfModel(); m.new(); pg = m.doc.new_page(width=400, height=600); pg.set_rotation(rot)
+        m.stamp(0, png, (300, 100), 60, 60)
+        (_, r), = m.stamps_on_page(0)
+        assert abs(r.x0 - 270) < 1 and abs(r.y0 - 70) < 1 and abs(r.x1 - 330) < 1 and abs(r.y1 - 130) < 1, (rot, r)
+        m.close()
+
+    # 押印の個別取り消し: 同じ印影を 2 か所に押しても片方だけ消せる。Undo で戻る
+    m = PdfModel(); m.new(); pg = m.doc.new_page(width=400, height=600); pg.set_rotation(90)
+    m.stamp(0, png, (100, 100), 60, 60)
+    m.stamp(0, png, (300, 400), 60, 60)
+    st = m.stamps_on_page(0)
+    assert len(st) == 2 and st[0][0] != st[1][0], "同じ画像でも押印ごとに別ストリーム"
+    assert st[1][1].contains(fitz.Point(300, 400)) and not st[1][1].contains(fitz.Point(100, 100))
+    assert m.stamp_at(0, (300, 400)) == st[1][0] and m.stamp_at(0, (10, 10)) is None
+    m.remove_stamp(0, st[1][0])
+    assert [x for x, _ in m.stamps_on_page(0)] == [st[0][0]]
+    p = os.path.join(tmp, "rm.pdf"); m.save(p)
+    x0, y0, x1, y1 = red_bbox(fitz.open(p)[0].get_pixmap(dpi=72))
+    assert abs((x0 + x1) / 2 - 100) < 4 and abs((y0 + y1) / 2 - 100) < 4, "残った方は (100,100) の印影"
+    m.undo()
+    assert len(m.stamps_on_page(0)) == 2, "取り消しを Undo すると戻る"
+    try:
+        m.remove_stamp(0, 1); raise AssertionError("押印以外が消せてしまう")
+    except ValueError:
+        pass
+    m.close()
     print("stamp tests passed")
 
 

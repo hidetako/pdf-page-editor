@@ -287,6 +287,33 @@ def main():
     assert not win.stamp_mode and not win.a_stamp.isChecked() and not dock.btn_mode.isChecked()
     assert win.view.ghost is None and win.view.cursor().shape() == Qt.ArrowCursor
 
+    step("押印の取り消し: 印影を右クリック → 「この押印を取り消す」、余白では無効項目、Ctrl+Z で戻る")
+    from PySide6.QtGui import QContextMenuEvent
+    picked = []
+    def fake_popup(menu, gpos):  # QMenu.exec はオフスクリーンでも実際にブロックするので差し替える
+        acts = [x for x in menu.actions() if not x.isSeparator()]
+        picked.append([(x.text(), x.isEnabled()) for x in acts])
+        for x in acts:
+            if x.isEnabled():
+                x.trigger(); break
+    win._popup_menu = fake_popup
+    QApplication.sendEvent(win.view, QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(2, 2), win.view.mapToGlobal(QPoint(2, 2)))); wait()
+    assert not picked, "ページ外の右クリックはメニューを出さない"
+    g = win.view.pix_geometry(); ox, oy, pw, ph = g
+    blank = QPoint(int(ox + pw * 0.2), int(oy + ph * 0.8))
+    QApplication.sendEvent(win.view, QContextMenuEvent(QContextMenuEvent.Mouse, blank, win.view.mapToGlobal(blank))); wait()
+    assert picked[-1][0] == ("ここに取り消せる押印はありません", False), picked[-1]
+    assert len(win.model.stamps_on_page(4)) == 1
+    QApplication.sendEvent(win.view, QContextMenuEvent(QContextMenuEvent.Mouse, target, win.view.mapToGlobal(target))); wait(100)
+    assert picked[-1][0] == ("この押印を取り消す", True), picked[-1]
+    assert win.model.stamps_on_page(4) == [] and "取り消しました" in win.statusBar().currentMessage()
+    QTest.keyClick(win, Qt.Key_Z, Qt.ControlModifier); wait()
+    assert len(win.model.stamps_on_page(4)) == 1, "Undo で押印が戻る"
+    QTest.keyClick(win, Qt.Key_Y, Qt.ControlModifier); wait()
+    assert win.model.stamps_on_page(4) == [], "Redo で再び消える"
+    QTest.keyClick(win, Qt.Key_Z, Qt.ControlModifier); wait()
+    shot(win, "stamp_removed_undone")
+
     step("押印: 印鑑パネルのボタンから ON/OFF、回転ページでも表示位置どおり")
     win.goto(0); wait()
     win.a_rotr.trigger(); wait()            # A-5 を 90° 回転

@@ -8,11 +8,11 @@ import os
 import sys
 
 import pymupdf as fitz
-from PySide6.QtCore import QItemSelectionModel, QPointF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QItemSelectionModel, QPoint, QPointF, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QDragEnterEvent, QDropEvent, QIcon, QImage,
                            QKeySequence, QPainter, QPixmap)
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QLabel, QListWidget,
-                               QListWidgetItem, QMainWindow, QMessageBox,
+                               QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QScrollArea, QSplitter, QStatusBar, QToolBar,
                                QWidget)
 
@@ -73,6 +73,7 @@ class PageView(QLabel):
     """ページ表示。押印モード中はマウス位置に印影のゴーストを描き、クリックで位置を通知する。"""
 
     clicked = Signal(QPointF)  # 表示中 pixmap 内の相対座標 (0〜1)
+    context_requested = Signal(QPointF, QPoint)  # 右クリック: 相対座標 (0〜1) と画面座標
 
     def __init__(self, text=""):
         super().__init__(text)
@@ -107,17 +108,31 @@ class PageView(QLabel):
         self.update()
         super().leaveEvent(e)
 
+    def _frac(self, pos) -> QPointF | None:
+        """ウィジェット座標 → 表示中ページ内の相対座標 (0〜1)。ページ外なら None。"""
+        g = self.pix_geometry()
+        if not g:
+            return None
+        ox, oy, pw, ph = g
+        fx = (pos.x() - ox) / pw
+        fy = (pos.y() - oy) / ph
+        return QPointF(fx, fy) if 0 <= fx <= 1 and 0 <= fy <= 1 else None
+
     def mousePressEvent(self, e):
         if self.stamp_mode and e.button() == Qt.LeftButton:
-            g = self.pix_geometry()
-            if g:
-                ox, oy, pw, ph = g
-                fx = (e.position().x() - ox) / pw
-                fy = (e.position().y() - oy) / ph
-                if 0 <= fx <= 1 and 0 <= fy <= 1:
-                    self.clicked.emit(QPointF(fx, fy))
-                    return
+            f = self._frac(e.position())
+            if f is not None:
+                self.clicked.emit(f)
+                return
         super().mousePressEvent(e)
+
+    def contextMenuEvent(self, e):
+        f = self._frac(e.pos())
+        if f is not None:
+            self.context_requested.emit(f, e.globalPos())
+            e.accept()
+            return
+        super().contextMenuEvent(e)
 
     def paintEvent(self, e):
         super().paintEvent(e)
@@ -155,6 +170,7 @@ class MainWindow(QMainWindow):
         self.view = PageView("PDF をここにドラッグ&ドロップ、または「開く」")
         self.view.setAlignment(Qt.AlignCenter)
         self.view.clicked.connect(self._on_page_clicked)
+        self.view.context_requested.connect(self._on_page_context)
         self.view.setStyleSheet("background:#555; color:#ddd; font-size:16px;")
         self.scroll = QScrollArea()
         self.scroll.setWidget(self.view)
@@ -236,7 +252,7 @@ class MainWindow(QMainWindow):
         act("全選択", self.thumbs.selectAll, "Ctrl+A", emenu, toolbar=False, tip="すべてのページを選択")
 
         tb.addSeparator()
-        self.a_stamp = act("押印モード", self._toggle_stamp_mode, "F2", smenu, icon="insert-image", tip="ON にしてページ上をクリックすると、右パネルで選んだ印鑑を押します。Esc で終了")
+        self.a_stamp = act("押印モード", self._toggle_stamp_mode, "F2", smenu, icon="insert-image", tip="ON にしてページ上をクリックすると、右パネルで選んだ印鑑を押します。Esc で終了。押した印影は右クリックで取り消せます")
         self.a_stamp.setCheckable(True)
         a_dock = act("印鑑パネルを表示", lambda on: self.stamp_dock.setVisible(on), None, smenu, toolbar=False, tip="右側の電子印鑑パネルの表示/非表示")
         a_dock.setCheckable(True); a_dock.setChecked(True)
@@ -500,6 +516,37 @@ class MainWindow(QMainWindow):
             return
         self.refresh_thumbs(select=[self.current], keep_view=True)
         self.statusBar().showMessage(f"押印しました（ページ {self.current + 1}）。続けてクリックで押印、Esc で終了", 5000)
+
+    def _on_page_context(self, frac: QPointF, gpos: QPoint):
+        """ページ上の右クリック。押印の上なら「この押印を取り消す」を出す。"""
+        if self.model.doc is None or not (0 <= self.current < self.model.page_count):
+            return
+        rect = self.model.doc[self.current].rect
+        pt = (frac.x() * rect.width, frac.y() * rect.height)
+        xref = self.model.stamp_at(self.current, pt)
+        menu = QMenu(self)
+        if xref is None:
+            none = menu.addAction("ここに取り消せる押印はありません")
+            none.setEnabled(False)
+        else:
+            menu.addAction("この押印を取り消す", lambda: self.remove_stamp(self.current, xref))
+        if self.stamp_mode:
+            menu.addSeparator()
+            menu.addAction("押印モードを終了", lambda: self._set_stamp_mode(False))
+        self._popup_menu(menu, gpos)
+
+    def _popup_menu(self, menu: QMenu, gpos: QPoint):
+        """メニューを表示して選択を待つ（テストではここを差し替える）。"""
+        menu.exec(gpos)
+
+    def remove_stamp(self, index: int, xref: int):
+        try:
+            self.model.remove_stamp(index, xref)
+        except Exception as e:
+            self._error(e)
+            return
+        self.refresh_thumbs(select=[index], keep_view=True)
+        self.statusBar().showMessage(f"押印を取り消しました（ページ {index + 1}）。Ctrl+Z で戻せます", 5000)
 
     # ------------------------------------------------------------ 表示
     def refresh_thumbs(self, select: list[int] | None = None, keep_view: bool = False):
