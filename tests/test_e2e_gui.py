@@ -107,7 +107,7 @@ def main():
                 win.a_up, win.a_down, win.a_extract, win.a_undo, win.a_redo):
         assert not act.isEnabled(), act.text()
     assert win.a_open.isEnabled()
-    assert "ドラッグ" in win.view.text()
+    assert win.view is None and win.empty_label.isVisible() and "ドラッグ" in win.empty_label.text()
     assert win.stamp_dock_widget.list.count() == 5, "既定の印鑑 5 種"
     win.a_stamp.trigger()
     assert not win.stamp_mode and not win.a_stamp.isChecked(), "文書なしでは押印モードに入れない"
@@ -134,7 +134,7 @@ def main():
     assert win.current == 0 and win.thumbs.selected_indices() == [0]
     assert win.page_label.text().startswith("ページ 1 / 5") and "幅合わせ" in win.page_label.text()
     assert "210 x 297 mm" in win.page_label.text()
-    assert not win.view.pixmap().isNull() and win.view.text() == ""
+    assert len(win.views) == 5 and not win.view.pixmap().isNull() and not win.empty_label.isVisible()
     for act in (win.a_save, win.a_saveas, win.a_insert, win.a_delete, win.a_rotl, win.a_rotr, win.a_up, win.a_down, win.a_extract):
         assert act.isEnabled(), act.text()
     assert not win.a_undo.isEnabled()
@@ -153,6 +153,28 @@ def main():
     QTest.mouseClick(win.thumbs.viewport(), Qt.LeftButton, Qt.ControlModifier, thumb_center(win, 4)); wait()
     assert win.thumbs.selected_indices() == [2, 4]
     assert win.a_delete.isEnabled()
+
+    step("連続スクロール: 全ページが縦に並び、スクロールで現在ページとサムネイル選択が追従、遠いページは未描画")
+    win.goto(0); wait()
+    vbar = win.scroll.verticalScrollBar()
+    assert vbar.maximum() > 0 and win.pages_widget.height() > win.scroll.viewport().height() * 3
+    assert win._page_top(1) == appmod.PAGE_GAP + win.views[0].height() + appmod.PAGE_GAP
+    assert win.views[0].rendered_key is not None and win.views[4].rendered_key is None, "表示範囲外は遅延描画"
+    vbar.setValue(vbar.maximum()); wait(100)
+    assert win.current == 4 and win.thumbs.currentRow() == 4 and win.thumbs.selected_indices() == [4]
+    assert win.views[4].rendered_key is not None and win.views[0].rendered_key is None, "離れたページの画像は捨てる"
+    assert win.page_label.text().startswith("ページ 5 / 5")
+    vbar.setValue(0); wait(100)
+    assert win.current == 0 and win.thumbs.selected_indices() == [0]
+    QTest.keyClick(win, Qt.Key_PageDown); wait(100)
+    assert win.current == 1 and vbar.value() == win._page_top(1) - appmod.PAGE_GAP, "PgDn は次ページの上端へ"
+    # ページの途中では、大きく見えている方が現在ページ（ページ 3 がほぼ全面なら 3、ページ 3 が 10px だけなら 2）
+    vbar.setValue(win._page_top(3) - appmod.PAGE_GAP - 10); wait(100)
+    assert win.current == 3, (win.current, vbar.value(), win._page_top(3), win.scroll.viewport().height())
+    vh = win.scroll.viewport().height()
+    vbar.setValue(win._page_top(3) - vh + 10); wait(100)
+    assert win.current == 2, (win.current, vbar.value(), win._page_top(3), vh)
+    win.goto(0); wait()
 
     step("ズーム: 拡大/縮小/幅合わせ/100%/Ctrl+ホイール")
     win.goto(0); wait()
@@ -280,8 +302,8 @@ def main():
     assert "押印しました（ページ 5）" in win.statusBar().currentMessage()
     assert win.stamp_mode, "連続押印のためモードは継続"
     assert win.current == 4 and win.model.page_count == 7
-    # 余白クリック（ページ外）は押印しない
-    QTest.mouseClick(win.view, Qt.LeftButton, Qt.NoModifier, QPoint(2, 2)); wait()
+    # ページ外（ページ間の余白）のクリックは押印しない
+    QTest.mouseClick(win.pages_widget, Qt.LeftButton, Qt.NoModifier, QPoint(1, 1)); wait()
     assert len(win.model._undo) == before_undo + 1
     shot(win, "stamped")
     QTest.keyClick(win, Qt.Key_Escape); wait()
@@ -298,8 +320,12 @@ def main():
             if x.isEnabled():
                 x.trigger(); break
     win._popup_menu = fake_popup
-    QApplication.sendEvent(win.view, QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(2, 2), win.view.mapToGlobal(QPoint(2, 2)))); wait()
-    assert not picked, "ページ外の右クリックはメニューを出さない"
+    QApplication.sendEvent(win.pages_widget, QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(1, 1), win.pages_widget.mapToGlobal(QPoint(1, 1)))); wait()
+    assert not picked, "ページ外の右クリックは押印メニューを出さない"
+    # ページ外の右クリックは Qt 標準のツールバー/パネル表示メニューになる（開いたままだとショートカットが効かないので閉じる）
+    pop = QApplication.activePopupWidget()
+    assert pop is not None and any(x.text() == "電子印鑑" for x in pop.actions())
+    pop.close(); wait()
     g = win.view.pix_geometry(); ox, oy, pw, ph = g
     blank = QPoint(int(ox + pw * 0.2), int(oy + ph * 0.8))
     QApplication.sendEvent(win.view, QContextMenuEvent(QContextMenuEvent.Mouse, blank, win.view.mapToGlobal(blank))); wait()
@@ -470,7 +496,7 @@ def main():
     # 文書を閉じた状態での D&D（破棄確認は Discard）
     QMessageBox.question = staticmethod(lambda *a_, **k: QMessageBox.Discard)
     win.model.close(); win.refresh_thumbs(); wait()
-    assert win.thumbs.count() == 0 and "ドラッグ" in win.view.text()
+    assert win.thumbs.count() == 0 and win.view is None and win.empty_label.isVisible()
     drop([a, b, img]); wait(150)
     # Windows では QUrl 経由のパスが C:/... 表記になるので、文字列ではなく同一ファイルかで比較する
     assert os.path.samefile(win.model.path, a) and win.model.page_count == 8
