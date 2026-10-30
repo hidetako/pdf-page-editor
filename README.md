@@ -27,22 +27,34 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 ## 他ソフトの印影を取り込む
 「おまかせ電子印鑑 for Business」でエクスポートした `.entstmp` は、印鑑パネルの「インポート」からそのまま読み込める（複数選択可）。大きさの情報は含まれていないので 15 mm で登録される。「編集」で直径や名前を直す。
 
+## インストール（Windows、ダウンロードして実行するだけ）
+1. [Releases](https://github.com/hidetako/pdf-page-editor/releases) から `PdfPageEditor-Setup-x.y.z.exe` をダウンロード
+2. ダブルクリックして「次へ」。管理者権限は不要（ユーザー領域にインストールされる）
+3. スタートメニューの「PDF Page Editor」から起動。エクスプローラーで PDF を右クリック →「プログラムから開く」にも出る
+
+未署名のため SmartScreen の警告が出る。「詳細情報」→「実行」で進める。
+アンインストールは Windows の「アプリと機能」から。印鑑データは `%APPDATA%\PdfPageEditor\stamps.json` に残る。
+
 ## 使い方（ソースから）
 1. このフォルダを `C:\dev\pdf-page-editor` などに置く
 2. `run.bat` をダブルクリック（初回は仮想環境作成とライブラリ取得で数分）
 
-## exe 化（インストール用）
-1. `build_windows.bat` をダブルクリック
-2. `dist\PdfPageEditor.exe` が生成される。これ 1 ファイルを任意の場所に置けば動く
-3. 「PDF を開くプログラム」に関連付けすれば、ダブルクリックで開ける（引数 1 つ目を開く）
+## exe・インストーラーを自分で作る
+- ローカル: `build_windows.bat` をダブルクリック。`dist\PdfPageEditor.exe` ができ、Inno Setup 6 が入っていれば `dist\PdfPageEditor-Setup-x.y.z.exe` も作られる
+- GitHub Actions: `app.py` の `__version__` を上げてタグ `vX.Y.Z` を push すると、`.github/workflows/release.yml` が Windows でビルドし Releases に公開する
 
-SmartScreen の警告は未署名 exe のため。「詳細情報」→「実行」で起動できる。
+```
+git tag v1.1.0
+git push origin v1.1.0
+```
 
 ## 構成
 - `pdfmodel.py` : PyMuPDF をラップした編集ロジック（Qt 非依存、単体テスト可）
 - `stamps.py`   : 印影の定義・描画・ライブラリ保存（Qt 非依存）
 - `stamp_ui.py` : 印鑑パネルと印鑑編集ダイアログ
 - `app.py`      : PySide6 GUI 本体
+- `assets/icon.ico` : アプリアイコン（`assets/make_icon.py` で生成）
+- `installer/PdfPageEditor.iss` : Inno Setup のインストーラー定義
 - `tests/test_model.py`, `tests/test_stamps.py` : 自動テスト（直接実行）
 - `tests/test_e2e_gui.py` : GUI の E2E テスト（オフスクリーンで実際の画面を操作。`E2E_SHOTS=出力先` で各段階のスクリーンショットを保存）
 

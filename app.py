@@ -21,11 +21,22 @@ from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
+__version__ = "1.1.0"
 THUMB_W = 140
 PAGE_GAP = 12           # 連続表示でのページ間の余白 (px)
 ZOOM_STEPS = [0.5, 0.67, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0]
 PDF_FILTER = "PDF ファイル (*.pdf)"
 INSERT_FILTER = "PDF / 画像 (*.pdf *.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp);;PDF (*.pdf);;画像 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp)"
+
+
+def resource_path(*parts: str) -> str:
+    """同梱ファイルのパス。PyInstaller で exe 化したときは展開先 (_MEIPASS) を見る。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, *parts)
+
+
+def app_icon() -> QIcon:
+    return QIcon(resource_path("assets", "icon.ico"))
 
 
 def pix_to_qimage(pix: fitz.Pixmap) -> QImage:
@@ -163,6 +174,7 @@ class MainWindow(QMainWindow):
         self.current = -1
         self.stamp_mode = False
         self.setWindowTitle(APP_NAME)
+        self.setWindowIcon(app_icon())
         self.resize(1280, 820)
         self.setAcceptDrops(True)
         self._build_ui()
@@ -238,6 +250,7 @@ class MainWindow(QMainWindow):
         emenu = self.menuBar().addMenu("編集(&E)")
         vmenu = self.menuBar().addMenu("表示(&V)")
         smenu = self.menuBar().addMenu("印鑑(&S)")
+        hmenu = self.menuBar().addMenu("ヘルプ(&H)")
 
         def act(text, slot, key=None, menu=None, toolbar=True, icon=None, tip=None):
             a = QAction(text, self)
@@ -286,6 +299,7 @@ class MainWindow(QMainWindow):
         self.stamp_dock.visibilityChanged.connect(a_dock.setChecked)
         # メニュー/ツールバーに載せないアクションは、ウィンドウに addAction しないとショートカットが効かない
         self.addAction(act("キャンセル（押印モード終了）", lambda: self._set_stamp_mode(False), "Esc", None, toolbar=False))
+        act("バージョン情報", self.show_about, None, hmenu, toolbar=False)
 
         tb.addSeparator()
         act("縮小", lambda: self.zoom_step(-1), "Ctrl+-", vmenu, icon="zoom-out", tip="表示を縮小。Ctrl+マウスホイールでも可")
@@ -372,6 +386,13 @@ class MainWindow(QMainWindow):
         st = s.value("state")
         if st is not None:
             self.restoreState(st)
+
+    def show_about(self):
+        QMessageBox.about(self, f"{APP_NAME} について",
+                          f"<b>{APP_NAME}</b> {__version__}<br><br>"
+                          "PDF の閲覧・ページ編集・電子印鑑ツール。<br>"
+                          "最新版: <a href='https://github.com/hidetako/pdf-page-editor/releases'>GitHub Releases</a><br><br>"
+                          "使用ライブラリ: PyMuPDF (AGPL-3.0), PySide6 (LGPL-3.0)")
 
     def _error(self, e: Exception):
         QMessageBox.critical(self, APP_NAME, f"エラー: {e}")
@@ -861,6 +882,8 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(__version__)
+    app.setWindowIcon(app_icon())
     w = MainWindow()
     w.show()
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
