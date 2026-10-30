@@ -280,6 +280,7 @@ class MainWindow(QMainWindow):
         self.toc_tree.setColumnWidth(0, 200)
         self.toc_tree.setToolTip("PDF の目次（索引）と自分で付けたしおり。クリックでそのページへ移動")
         self.toc_tree.itemClicked.connect(self._on_toc_clicked)
+        self.toc_tree.currentItemChanged.connect(lambda *_: self._update_actions())   # キーボード選択でもボタンを有効化
         self.toc_tree.itemDoubleClicked.connect(lambda *_: self.rename_bookmark())
         tl.addWidget(self.toc_tree, 1)
         bl = QHBoxLayout()
