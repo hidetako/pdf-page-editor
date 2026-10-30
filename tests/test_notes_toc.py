@@ -1,6 +1,9 @@
 """表示モード・付箋・しおり（目次）のテスト。python tests/test_notes_toc.py"""
 import os
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows の cp1252 コンソール対策
 import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")

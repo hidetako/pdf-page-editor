@@ -30,6 +30,8 @@ jobs:
       - name: Run tests (unit + GUI E2E, offscreen)
         env:
           QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"            # Windows ランナーの標準出力は cp1252 なので、日本語の出力で落ちないように UTF-8 にする
+          PYTHONIOENCODING: utf-8
         run: |
           python tests/test_model.py
           python tests/test_stamps.py

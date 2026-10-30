@@ -3,6 +3,9 @@ import base64
 import datetime
 import os
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows の cp1252 コンソール対策
 import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

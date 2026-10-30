@@ -7,6 +7,9 @@
 """
 import os
 import sys
+
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # Windows の cp1252 コンソール対策
 import tempfile
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
