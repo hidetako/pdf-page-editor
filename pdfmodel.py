@@ -6,11 +6,13 @@ PyMuPDF (fitz) をラップし、ページ並べ替え・回転・削除・挿�
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from typing import Iterable, Sequence
 
 import pymupdf as fitz  # PyMuPDF
 
+_CM_RE = re.compile(r"([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) cm")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 MAX_UNDO = 20
 
@@ -22,6 +24,7 @@ class PdfModel:
         self.modified = False
         self._undo: list[bytes] = []
         self._redo: list[bytes] = []
+        self._stamp_streams: set[int] = set()   # このセッションで押印した内容ストリームの xref（押印 1 つ = 1 ストリーム）
 
     # ------------------------------------------------------------ 基本
     @property
@@ -53,6 +56,7 @@ class PdfModel:
         self.modified = False
         self._undo.clear()
         self._redo.clear()
+        self._stamp_streams.clear()
 
     def _require(self) -> fitz.Document:
         if self.doc is None:
@@ -188,9 +192,47 @@ class PdfModel:
         cx, cy = center
         rect = fitz.Rect(cx - width_pt / 2, cy - height_pt / 2, cx + width_pt / 2, cy + height_pt / 2)
         self._push_undo()
-        # insert_image は回転前の座標系を使うので derotation で変換し、画像側を逆回転して正立させる
+        before = set(page.get_contents())
+        # insert_image は回転前の座標系を使うので derotation で変換し、画像側を逆回転して正立させる。
+        # 押印 1 つにつき内容ストリームが 1 つ追加されるので、その xref を覚えて個別に取り消せるようにする
         page.insert_image(rect * page.derotation_matrix, stream=png, rotate=page.rotation,
                           keep_proportion=True, overlay=True)
+        self._stamp_streams.update(set(page.get_contents()) - before)
+        self.modified = True
+
+    def stamps_on_page(self, index: int) -> list[tuple[int, fitz.Rect]]:
+        """ページ上にある「このセッションで押した」印影の (ストリーム xref, 表示座標の矩形) 一覧。押した順。"""
+        doc = self._require()
+        page = doc[index]
+        out = []
+        for cx in page.get_contents():
+            if cx not in self._stamp_streams:
+                continue
+            m = _CM_RE.search(doc.xref_stream(cx).decode("latin-1"))
+            if not m:
+                continue
+            mat = fitz.Matrix(*[float(v) for v in m.groups()])
+            # cm は PDF 座標系（左下原点）。transformation_matrix でページ座標へ、rotation_matrix で表示座標へ
+            r = (fitz.Rect(0, 0, 1, 1) * mat * page.transformation_matrix * page.rotation_matrix).normalize()
+            out.append((cx, r))
+        return out
+
+    def stamp_at(self, index: int, point: tuple[float, float]) -> int | None:
+        """表示座標 point の位置にある押印の xref（重なっていれば後から押したもの）。無ければ None。"""
+        hits = [x for x, r in self.stamps_on_page(index) if r.contains(fitz.Point(*point))]
+        return hits[-1] if hits else None
+
+    def remove_stamp(self, index: int, xref: int) -> None:
+        """押印 1 つを取り消す（Undo 可）。"""
+        doc = self._require()
+        page = doc[index]
+        contents = page.get_contents()
+        if xref not in self._stamp_streams or xref not in contents:
+            raise ValueError("この位置に取り消せる押印はありません。")
+        self._push_undo()
+        contents.remove(xref)
+        doc.xref_set_key(page.xref, "Contents", "[" + " ".join(f"{x} 0 R" for x in contents) + "]")
+        # 記録は残す（Undo で戻ったときに再び押印として扱えるように。実在はページの内容と突き合わせて判定する）
         self.modified = True
 
     # ------------------------------------------------------------ 保存

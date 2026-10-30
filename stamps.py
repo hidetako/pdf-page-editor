@@ -20,6 +20,7 @@ import pymupdf as fitz
 MM = 72 / 25.4
 FONT = "japan"
 SHU = [0.86, 0.13, 0.13]  # 朱色
+MAX_IMAGE_PX = 4000       # 画像印を描画する最大ピクセル幅
 
 KINDS = {
     "mitome": "認印・三文判（丸・縦書き）",
@@ -62,6 +63,7 @@ class Stamp:
     date_format: str = "yyyy.mm.dd"
     font_scale: float = 1.0        # 文字の大きさ倍率
     image_b64: str = ""            # 画像印の PNG (base64)
+    recolor: bool = False          # 画像印を color で塗り直す（白地・濃淡はインク量として扱う）
     id: str = field(default_factory=lambda: uuid.uuid4().hex)
 
     def to_dict(self) -> dict:
@@ -193,11 +195,19 @@ def render_png(stamp: Stamp, dpi: int = 600, date: _dt.date | None = None,
     date = date or _dt.date.today()
     w, h = stamp.size_pt()
     scale = dpi / 72
-    mat = fitz.Matrix(scale, scale).prerotate(tilt_deg)
     if stamp.kind == "image":
         if not stamp.image_b64:
             raise ValueError("画像が設定されていません。")
         src = fitz.Pixmap(base64.b64decode(stamp.image_b64))
+        if stamp.recolor:
+            src = recolor_pixmap(src, stamp.color)
+        if tilt_deg == 0 and opacity >= 1.0 and kasure <= 0:
+            # 加工なしなら元画像のピクセルをそのまま使う（再サンプリングによるにじみを避ける）
+            return _as_rgba(src).tobytes("png")
+        # 元画像の解像度を下回らないようにする（小さい押印サイズでもぼやけない）。上限 4000px
+        scale = min(max(scale, src.width / (w or 1)), MAX_IMAGE_PX / (w or 1))
+    mat = fitz.Matrix(scale, scale).prerotate(tilt_deg)
+    if stamp.kind == "image":
         doc = fitz.open()
         page = doc.new_page(width=w, height=h)
         page.insert_image(page.rect, pixmap=src)
@@ -210,6 +220,35 @@ def render_png(stamp: Stamp, dpi: int = 600, date: _dt.date | None = None,
     if opacity < 1.0 or kasure > 0:
         pix = _post_process(pix, opacity, kasure, seed)
     return pix.tobytes("png")
+
+
+def _as_rgba(pix: fitz.Pixmap) -> fitz.Pixmap:
+    """RGB+alpha の Pixmap にそろえる（グレー・CMYK・アルファなしに対応）。"""
+    if pix.n - pix.alpha != 3:
+        pix = fitz.Pixmap(fitz.csRGB, pix)
+    if not pix.alpha:
+        pix = fitz.Pixmap(pix, 1)
+    return pix
+
+
+def recolor_pixmap(pix: fitz.Pixmap, color) -> fitz.Pixmap:
+    """画像印を単色に塗り直す。透明部分がある画像はアルファをインク量に、
+    アルファのない画像は白からの濃さ (1 - min(R,G,B)) をインク量にする。"""
+    pix = _as_rgba(pix)
+    # MuPDF の alpha 付き samples は事前乗算済み (RGB <= alpha)。出力も同じ形式で作る
+    arr = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 4).astype(np.float32) / 255
+    a = arr[:, :, 3]
+    if a.min() < a.max():
+        # 透明部分がある画像: 形はアルファが持っている（グレーのマスク画像でも薄くならない）
+        ink = a
+    else:
+        # アルファなし（白地の画像）: 白からの濃さ・鮮やかさをインク量にする
+        ink = np.clip(1.0 - arr[:, :, :3].min(axis=2), 0, 1)
+    out = np.empty_like(arr)
+    for c in range(3):
+        out[:, :, c] = color[c] * ink
+    out[:, :, 3] = ink
+    return fitz.Pixmap(fitz.csRGB, pix.width, pix.height, (out * 255 + 0.5).astype(np.uint8).tobytes(), True)
 
 
 def _post_process(pix: fitz.Pixmap, opacity: float, kasure: float, seed: int | None) -> fitz.Pixmap:
@@ -230,8 +269,8 @@ def _post_process(pix: fitz.Pixmap, opacity: float, kasure: float, seed: int | N
     return fitz.Pixmap(fitz.csRGB, pix.width, pix.height, out.tobytes(), True)
 
 
-def image_to_stamp_png(path: str, knockout_white: bool = True, threshold: int = 200) -> bytes:
-    """スキャン画像などから印影 PNG を作る。白地を透過し、朱色成分を残す。"""
+def image_to_stamp_png(path: str | bytes, knockout_white: bool = True, threshold: int = 200) -> bytes:
+    """スキャン画像などから印影 PNG を作る。白地を透過し、朱色成分を残す。path は画像データ (bytes) でも可。"""
     pix = fitz.Pixmap(path)
     if pix.n - pix.alpha != 3:
         pix = fitz.Pixmap(fitz.csRGB, pix)
@@ -243,7 +282,11 @@ def image_to_stamp_png(path: str, knockout_white: bool = True, threshold: int = 
         lum = rgb.mean(axis=2)
         # 明るさに応じて滑らかに透過（threshold 以上は完全透過）
         a = np.clip((threshold - lum) / max(threshold - 60, 1), 0, 1) * 255
-        arr[:, :, 3] = np.minimum(arr[:, :, 3], a.astype(np.uint8))
+        new_a = np.minimum(arr[:, :, 3], a.astype(np.uint8))
+        # samples は事前乗算済みなので、alpha を下げた分だけ RGB も下げる（でないと縁の色が壊れる）
+        old_a = np.maximum(arr[:, :, 3].astype(np.float32), 1)
+        arr[:, :, :3] = (arr[:, :, :3].astype(np.float32) * (new_a / old_a)[:, :, None] + 0.5).astype(np.uint8)
+        arr[:, :, 3] = new_a
     out = fitz.Pixmap(fitz.csRGB, pix.width, pix.height, arr.tobytes(), True)
     return out.tobytes("png")
 
@@ -292,9 +335,13 @@ class StampLibrary:
             json.dump({"version": 1, "stamps": [s.to_dict() for s in (stamps or self.stamps)]}, f, ensure_ascii=False, indent=2)
 
     def import_file(self, path: str) -> int:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-        items = data.get("stamps", data if isinstance(data, list) else [])
+        """本アプリの JSON、または「おまかせ電子印鑑 for Business」の .entstmp を取り込む。"""
+        if os.path.splitext(path)[1].lower() == ".entstmp":
+            items = [s.to_dict() for s in import_entstmp(path)]
+        else:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            items = data.get("stamps", data if isinstance(data, list) else [])
         ids = {s.id for s in self.stamps}
         n = 0
         for d in items:
@@ -305,6 +352,51 @@ class StampLibrary:
             n += 1
         self.save()
         return n
+
+
+def import_entstmp(path: str, size_mm: float = 15.0) -> list[Stamp]:
+    """「おまかせ電子印鑑 for Business」(EntrustStampForBusiness) の .entstmp を読む。
+
+    実体は UTF-8 の XML で、<stampEntity image="base64 PNG" ...> が印影。
+    物理サイズは記録されていないため size_mm は既定値を入れ、後から編集してもらう。
+    画像にアルファが無ければ白地を透過する。文字だけの印鑑（image 属性なし）は対象外。
+    """
+    import xml.etree.ElementTree as ET
+    tree = ET.parse(path)
+    root = tree.getroot()
+    if root.tag != "ENTSTMP":
+        raise ValueError("おまかせ電子印鑑の印影ファイル (.entstmp) ではありません。")
+    base = os.path.splitext(os.path.basename(path))[0]
+    entities = [e for e in root.iter("stampEntity") if e.get("image")]
+    if not entities:
+        raise ValueError("画像の印影が含まれていません（文字だけの印鑑は未対応）。")
+    out = []
+    for i, e in enumerate(entities):
+        png = base64.b64decode(e.get("image"))
+        pix = fitz.Pixmap(png)
+        if not pix.alpha:
+            png = image_to_stamp_png(png)
+        name = base if len(entities) == 1 else f"{base} {i + 1}"
+        # 画像は色なしのマスク（グレー）で入っていることがあり、元ソフトは col 属性 (AARRGGBB) の色で塗って表示する
+        color = _parse_argb(e.get("col")) or list(SHU)
+        out.append(Stamp(name=name, kind="image", lines=[], size_mm=size_mm, color=color, recolor=True,
+                         image_b64=base64.b64encode(png).decode("ascii")))
+    return out
+
+
+def _parse_argb(text: str | None) -> list[float] | None:
+    """"ffd80016" (AARRGGBB) または "d80016" (RRGGBB) を 0〜1 の RGB にする。"""
+    if not text:
+        return None
+    h = text.strip().lstrip("#")
+    if len(h) == 8:
+        h = h[2:]
+    if len(h) != 6:
+        return None
+    try:
+        return [int(h[k:k + 2], 16) / 255 for k in (0, 2, 4)]
+    except ValueError:
+        return None
 
 
 def random_tilt(max_deg: float) -> float:
