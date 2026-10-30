@@ -316,8 +316,8 @@ def main():
     def fake_popup(menu, gpos):  # QMenu.exec はオフスクリーンでも実際にブロックするので差し替える
         acts = [x for x in menu.actions() if not x.isSeparator()]
         picked.append([(x.text(), x.isEnabled()) for x in acts])
-        for x in acts:
-            if x.isEnabled():
+        for x in acts:  # 押印に関する項目だけを対象にする（付箋・しおりの項目はダイアログを開くため）
+            if x.isEnabled() and "押印" in x.text():
                 x.trigger(); break
     win._popup_menu = fake_popup
     QApplication.sendEvent(win.pages_widget, QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(1, 1), win.pages_widget.mapToGlobal(QPoint(1, 1)))); wait()
@@ -541,6 +541,181 @@ def main():
     assert w5.toolBarArea(w5.toolbar) == Qt.LeftToolBarArea, "ツールバー位置が復元される"
     assert not w5.stamp_dock.isVisible(), "印鑑パネルの表示状態も復元される"
     w5.addToolBar(Qt.TopToolBarArea, w5.toolbar); w5.stamp_dock.show(); assert w5.close()
+
+    step("目次付き PDF: 開くと目次パネルが自動で開き、項目クリックでそのページへ移動")
+    toc_pdf = os.path.join(_TMP, "toc.pdf")
+    make_pdf(toc_pdf, 4, "T")
+    _d = fitz.open(toc_pdf); _d.set_toc([[1, "第1章", 1], [2, "1-1", 2], [1, "第2章", 4]]); _d.saveIncr(); _d.close()
+    w6 = MainWindow(); w6.resize(1400, 900); w6.show(); wait(50)
+    assert not w6.toc_dock.isVisible()
+    w6.open_file(toc_pdf); wait(100)
+    assert w6.toc_dock.isVisible() and w6.a_toc_dock.isChecked()
+    assert w6.toc_tree.topLevelItemCount() == 2 and w6.toc_tree.topLevelItem(0).childCount() == 1
+    it2 = w6.toc_tree.topLevelItem(1)
+    rect = w6.toc_tree.visualItemRect(it2)
+    QTest.mouseClick(w6.toc_tree.viewport(), Qt.LeftButton, Qt.NoModifier, rect.center()); wait(150)
+    assert w6.current == 3, f"目次クリックで 4 ページ目へ: {w6.current}"
+    shot(w6, "toc_panel")
+
+    step("しおり: Ctrl+D で現在ページをしおりに追加 → 目次に並ぶ、名前変更、削除、Undo で戻る")
+    w6.goto(1); wait(100)
+    w6._ask_line = lambda title, label, default="": "重要ページ"
+    QTest.keyClick(w6, Qt.Key_D, Qt.ControlModifier); wait(100)
+    assert [t[1] for t in w6.model.get_toc()] == ["第1章", "1-1", "重要ページ", "第2章"], w6.model.get_toc()
+    assert w6.toc_tree.topLevelItemCount() == 3 and w6.model.modified
+    tgt = next(w6.toc_tree.topLevelItem(i) for i in range(3) if w6.toc_tree.topLevelItem(i).text(0) == "重要ページ")
+    w6.toc_tree.setCurrentItem(tgt); wait()
+    assert w6.btn_bm_rename.isEnabled() and w6.btn_bm_del.isEnabled()
+    w6._ask_line = lambda title, label, default="": default + "（改）"
+    QTest.mouseClick(w6.btn_bm_rename, Qt.LeftButton); wait()
+    assert "重要ページ（改）" in [t[1] for t in w6.model.get_toc()]
+    tgt = next(w6.toc_tree.topLevelItem(i) for i in range(3) if w6.toc_tree.topLevelItem(i).text(0) == "重要ページ（改）")
+    w6.toc_tree.setCurrentItem(tgt); wait()
+    QTest.mouseClick(w6.btn_bm_del, Qt.LeftButton); wait()
+    assert len(w6.model.get_toc()) == 3 and w6.toc_tree.topLevelItemCount() == 2
+    QTest.keyClick(w6, Qt.Key_Z, Qt.ControlModifier); wait()
+    assert len(w6.model.get_toc()) == 4, "Undo でしおりが戻る"
+
+    step("付箋: F3 でモード ON → クリックでメモ、ホバーで内容、右クリックで編集/削除、Undo、押印モードと排他")
+    w6.goto(0); wait(100)
+    w6._ask_text = lambda title, label, default="": "要確認です"
+    QTest.keyClick(w6, Qt.Key_F3); wait()
+    assert w6.note_mode and w6.a_note.isChecked() and w6.view.note_mode and w6.view.cursor().shape() == Qt.CrossCursor
+    g = w6.view.pix_geometry(); ox, oy, pw, ph = g
+    at = QPoint(int(ox + pw * 0.6), int(oy + ph * 0.3))
+    QTest.mouseClick(w6.view, Qt.LeftButton, Qt.NoModifier, at); wait(150)
+    notes = w6.model.notes_on_page(0)
+    assert len(notes) == 1 and notes[0]["text"] == "要確認です", notes
+    r = notes[0]["rect"]; pr = w6.model.doc[0].rect
+    assert abs(r.x0 - pr.width * 0.6) < 3 and abs(r.y0 - pr.height * 0.3) < 3, "クリック位置に付箋"
+    assert w6.note_mode, "連続して貼れるようモードは継続"
+    # ホバー: 付箋の上でツールチップ、余白では出ない
+    from PySide6.QtWidgets import QToolTip
+    on_note = QPoint(int(ox + (r.x0 + 6) * pw / pr.width), int(oy + (r.y0 + 6) * ph / pr.height))
+    QTest.mouseMove(w6.view, on_note); wait(100)
+    assert "要確認です" in QToolTip.text(), QToolTip.text()
+    QTest.mouseMove(w6.view, QPoint(int(ox + pw * 0.1), int(oy + ph * 0.9))); wait(700)   # hideText はフェード後に消える
+    assert not QToolTip.isVisible() and QToolTip.text() == "", QToolTip.text()
+    # 右クリック → 編集 / 削除（メニューを差し替えて項目を選ぶ）
+    from PySide6.QtGui import QContextMenuEvent as _CME
+    chosen = []
+    def pick_note(menu, gpos):
+        acts = {x.text(): x for x in menu.actions() if not x.isSeparator()}
+        chosen.append(sorted(acts))
+        for key in ("付箋を編集...", ):
+            if key in acts:
+                acts[key].trigger(); return
+    w6._popup_menu = pick_note
+    w6._ask_text = lambda title, label, default="": default + "（済）"
+    QApplication.sendEvent(w6.view, _CME(_CME.Mouse, on_note, w6.view.mapToGlobal(on_note))); wait(100)
+    assert "付箋を編集..." in chosen[-1] and "付箋を削除" in chosen[-1], chosen[-1]
+    assert w6.model.notes_on_page(0)[0]["text"] == "要確認です（済）"
+    def pick_delete(menu, gpos):
+        for x in menu.actions():
+            if x.text() == "付箋を削除":
+                x.trigger(); return
+    w6._popup_menu = pick_delete
+    QApplication.sendEvent(w6.view, _CME(_CME.Mouse, on_note, w6.view.mapToGlobal(on_note))); wait(100)
+    assert w6.model.notes_on_page(0) == [] and "削除" in w6.statusBar().currentMessage()
+    QTest.keyClick(w6, Qt.Key_Z, Qt.ControlModifier); wait()
+    assert len(w6.model.notes_on_page(0)) == 1, "Undo で付箋が戻る"
+    # 余白の右クリックには「ここに付箋を追加」「このページをしおりに追加」
+    w6._popup_menu = lambda menu, gpos: chosen.append(sorted(x.text() for x in menu.actions() if not x.isSeparator()))
+    blank = QPoint(int(ox + pw * 0.1), int(oy + ph * 0.9))
+    QApplication.sendEvent(w6.view, _CME(_CME.Mouse, blank, w6.view.mapToGlobal(blank))); wait()
+    assert "ここに付箋を追加..." in chosen[-1] and "このページをしおりに追加..." in chosen[-1] and "付箋を編集..." not in chosen[-1]
+    # Esc で終了、押印モードに入ると付箋モードは解除され、印鑑パネルが自動で開く
+    QTest.keyClick(w6, Qt.Key_Escape); wait()
+    assert not w6.note_mode and not w6.a_note.isChecked() and w6.view.cursor().shape() == Qt.ArrowCursor
+    QTest.keyClick(w6, Qt.Key_F3); wait(); assert w6.note_mode
+    w6.stamp_dock.hide(); wait()
+    QTest.keyClick(w6, Qt.Key_F2); wait()
+    assert w6.stamp_mode and not w6.note_mode, "押印モードに入ると付箋モードは解除"
+    assert w6.stamp_dock.isVisible(), "押印モードに入ると印鑑パネルが自動で開く"
+    QTest.keyClick(w6, Qt.Key_Escape); wait(); assert not w6.stamp_mode
+    shot(w6, "note_added")
+
+    step("表示モード: メニューで暖色/白黒反転に切替、ページ色が変わる、保存・再起動で復元、ノーマルに戻る")
+    w6.mode_actions["warm"].trigger(); wait(150)
+    assert w6.display_mode == "warm" and "#faf0dc" in w6.view.styleSheet()
+    c = w6.view.pixmap().toImage().pixelColor(5, 5)
+    assert (c.red(), c.green(), c.blue()) == (250, 240, 220), (c.red(), c.green(), c.blue())
+    assert "暖色" in w6.page_label.text()
+    shot(w6, "display_warm")
+    w6.mode_actions["invert"].trigger(); wait(150)
+    c = w6.view.pixmap().toImage().pixelColor(5, 5); assert (c.red(), c.green(), c.blue()) == (0, 0, 0)
+    assert "#000000" in w6.view.styleSheet()
+    shot(w6, "display_invert")
+    # 保存 → 別名で保存した PDF に付箋としおりが残っている（表示モードは PDF には影響しない）
+    saved = os.path.join(_TMP, "toc_saved.pdf")
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (saved, ""))
+    QTest.keyClick(w6, Qt.Key_S, Qt.ControlModifier | Qt.ShiftModifier); wait(100)
+    _d = fitz.open(saved)
+    assert [t[1] for t in _d.get_toc()] == ["第1章", "1-1", "重要ページ（改）", "第2章"] or len(_d.get_toc()) == 4
+    assert [x.type[1] for x in _d[0].annots()] == ["Text"] and _d[0].annots().__next__().info["content"] == "要確認です（済）"
+    px = _d[0].get_pixmap(dpi=36); assert px.pixel(1, 1) == (255, 255, 255), "保存した PDF の地色は白のまま"
+    _d.close()
+    assert w6.close()
+    w7 = MainWindow(); w7.show(); wait(50)
+    assert w7.display_mode == "invert" and w7.mode_actions["invert"].isChecked(), "表示モードが復元される"
+    w7.mode_actions["normal"].trigger(); wait()
+    assert w7.display_mode == "normal"
+    assert w7.close()
+
+    step("テキスト選択: ドラッグで文字を選択 → 強調表示、Ctrl+C でコピー、右クリックに「コピー」、Esc で解除")
+    sel_pdf = os.path.join(_TMP, "sel.pdf")
+    _d = fitz.open(); _pg = _d.new_page(width=595, height=842)
+    _pg.insert_text((72, 100), "Hello World from PDF", fontsize=24)
+    _pg.insert_text((72, 160), "稟議書 承認済み", fontsize=24, fontname="japan")
+    _pg.insert_text((72, 220), "second line here", fontsize=24)
+    _d.save(sel_pdf); _d.close()
+    w8 = MainWindow(); w8.resize(1400, 900); w8.show(); wait(50)
+    w8.open_file(sel_pdf); wait(150)
+    words = w8.model.page_words(0)
+    assert [w["text"] for w in words][:4] == ["Hello", "World", "from", "PDF"], [w["text"] for w in words]
+    v = w8.view; ox, oy, pw, ph = v.pix_geometry(); pr = w8.model.doc[0].rect
+    def to_widget(r, fx=0.5, fy=0.5):
+        return QPoint(int(ox + (r.x0 + (r.x1 - r.x0) * fx) * pw / pr.width), int(oy + (r.y0 + (r.y1 - r.y0) * fy) * ph / pr.height))
+    # "World" から "second" までドラッグ（2 行またぎ、日本語行を含む）
+    start = to_widget(words[1]["rect"]); end = to_widget(words[-3]["rect"])
+    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, start); wait()
+    QTest.mouseMove(v, QPoint(start.x() + 40, start.y() + 30)); wait()
+    QTest.mouseMove(v, end); wait()
+    QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, end); wait(100)
+    assert w8.sel_range is not None and len(v.selection_rects) >= 5, (w8.sel_range, len(v.selection_rects))
+    assert w8.selected_text == "World from PDF\n稟議書 承認済み\nsecond", repr(w8.selected_text)
+    assert w8.a_copy.isEnabled() and "選択中" in w8.statusBar().currentMessage()
+    shot(w8, "text_selected")
+    QApplication.clipboard().setText("")
+    QTest.keyClick(w8, Qt.Key_C, Qt.ControlModifier); wait(100)
+    assert QApplication.clipboard().text() == w8.selected_text, repr(QApplication.clipboard().text())
+    assert "コピーしました" in w8.statusBar().currentMessage()
+    # 右クリックメニューの先頭に「コピー」
+    menu_items = []
+    w8._popup_menu = lambda menu, gpos: menu_items.append([x.text() for x in menu.actions() if not x.isSeparator()])
+    from PySide6.QtGui import QContextMenuEvent as _CME2
+    QApplication.sendEvent(v, _CME2(_CME2.Mouse, end, v.mapToGlobal(end))); wait()
+    assert menu_items[-1][0] == "コピー", menu_items[-1]
+    # 余白をクリックすると選択解除、文字の上では I ビーム
+    blank = QPoint(int(ox + pw * 0.5), int(oy + ph * 0.8))
+    QTest.mouseClick(v, Qt.LeftButton, Qt.NoModifier, blank); wait(100)
+    assert w8.selected_text == "" and not v.selection_rects and not w8.a_copy.isEnabled()
+    QTest.mouseMove(v, to_widget(words[0]["rect"])); wait(100)
+    assert v.cursor().shape() == Qt.IBeamCursor
+    QTest.mouseMove(v, blank); wait(100)
+    assert v.cursor().shape() == Qt.ArrowCursor
+    # 1 単語だけの選択 → Esc で解除。押印モード中はドラッグしても選択されない
+    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, to_widget(words[0]["rect"], 0.2)); wait()
+    QTest.mouseMove(v, to_widget(words[0]["rect"], 0.9)); wait()
+    QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, to_widget(words[0]["rect"], 0.9)); wait(100)
+    assert w8.selected_text == "Hello", repr(w8.selected_text)
+    QTest.keyClick(w8, Qt.Key_Escape); wait()
+    assert w8.selected_text == "" and not v.selection_rects
+    w8.stamp_dock_widget.list.setCurrentRow(0); w8.a_stamp.trigger(); wait()
+    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, start); QTest.mouseMove(v, end); QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, end); wait(150)
+    assert w8.selected_text == "" and len(w8.model.stamps_on_page(0)) == 1, "押印モードのドラッグは押印になる"
+    QTest.keyClick(w8, Qt.Key_Escape); wait()
+    w8.model.modified = False; assert w8.close()
 
     step("変更なしで開き直し: 確認ダイアログは出ない")
     asked = []

@@ -33,6 +33,7 @@ jobs:
         run: |
           python tests/test_model.py
           python tests/test_stamps.py
+          python tests/test_notes_toc.py
           python tests/test_e2e_gui.py
 
       - name: Determine version
@@ -48,7 +49,8 @@ jobs:
           echo "version: $v"
 
       - name: Build exe (PyInstaller)
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" app.py
+                # PyMuPDF 2.x のレイアウト解析モデルは不要なので除外（同梱すると起動時に layout_rf*.yaml を探して失敗する）
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
 
       - name: Build installer (Inno Setup)
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" installer\PdfPageEditor.iss'

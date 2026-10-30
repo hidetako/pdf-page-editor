@@ -235,6 +235,111 @@ class PdfModel:
         # 記録は残す（Undo で戻ったときに再び押印として扱えるように。実在はページの内容と突き合わせて判定する）
         self.modified = True
 
+    # ------------------------------------------------------------ 付箋（テキスト注釈）
+    def notes_on_page(self, index: int) -> list[dict]:
+        """ページ上の付箋（Text 注釈）一覧。rect は表示座標。"""
+        doc = self._require()
+        page = doc[index]
+        out = []
+        for annot in page.annots(types=[fitz.PDF_ANNOT_TEXT]):
+            info = annot.info
+            out.append({
+                "xref": annot.xref,
+                "rect": (annot.rect * page.rotation_matrix).normalize(),
+                "text": info.get("content", ""),
+                "title": info.get("title", ""),
+            })
+        return out
+
+    def note_at(self, index: int, point: tuple[float, float]) -> dict | None:
+        """表示座標 point にある付箋（重なっていれば後のもの）。無ければ None。"""
+        pt = fitz.Point(*point)
+        hits = [n for n in self.notes_on_page(index) if n["rect"].contains(pt)]
+        return hits[-1] if hits else None
+
+    def add_note(self, index: int, point: tuple[float, float], text: str, title: str = "") -> int:
+        """表示座標 point を左上として付箋を置く。注釈の xref を返す。"""
+        doc = self._require()
+        page = doc[index]
+        self._push_undo()
+        annot = page.add_text_annot(fitz.Point(*point) * page.derotation_matrix, text, icon="Note")
+        annot.set_info(title=title or "付箋", content=text)
+        annot.set_colors(stroke=(1.0, 0.85, 0.2))
+        annot.update()
+        self.modified = True
+        return annot.xref
+
+    def update_note(self, index: int, xref: int, text: str) -> None:
+        doc = self._require()
+        page = doc[index]
+        for annot in page.annots(types=[fitz.PDF_ANNOT_TEXT]):
+            if annot.xref == xref:
+                self._push_undo()
+                # Undo スナップショット後に取り直す（同じ page オブジェクトは使い続けられる）
+                annot.set_info(content=text)
+                annot.update()
+                self.modified = True
+                return
+        raise ValueError("付箋が見つかりません。")
+
+    def remove_note(self, index: int, xref: int) -> None:
+        doc = self._require()
+        page = doc[index]
+        for annot in page.annots(types=[fitz.PDF_ANNOT_TEXT]):
+            if annot.xref == xref:
+                self._push_undo()
+                page.delete_annot(annot)
+                self.modified = True
+                return
+        raise ValueError("付箋が見つかりません。")
+
+    # ------------------------------------------------------------ しおり / 目次（アウトライン）
+    def get_toc(self) -> list[list]:
+        """[[レベル, タイトル, ページ番号(1 始まり)], ...]。目次の無い PDF は空リスト。"""
+        return self._require().get_toc(simple=True)
+
+    def add_bookmark(self, index: int, title: str) -> None:
+        """ページ index(0 始まり) へのしおりを、ページ順の位置にレベル 1 で追加する。"""
+        doc = self._require()
+        toc = doc.get_toc(simple=True)
+        self._push_undo()
+        entry = [1, title, index + 1]
+        pos = len(toc)
+        for i, (lvl, _t, pg) in enumerate(toc):
+            if lvl == 1 and pg > index + 1:
+                pos = i
+                break
+        toc.insert(pos, entry)
+        doc.set_toc(toc)
+        self.modified = True
+
+    def remove_toc_entry(self, pos: int) -> None:
+        """目次の pos 番目の項目を削除（子項目はひとつ上のレベルへ繰り上げる）。"""
+        doc = self._require()
+        toc = doc.get_toc(simple=True)
+        if not (0 <= pos < len(toc)):
+            raise ValueError("目次の項目が見つかりません。")
+        self._push_undo()
+        lvl = toc[pos][0]
+        del toc[pos]
+        for i in range(pos, len(toc)):
+            if toc[i][0] > lvl:
+                toc[i][0] -= 1
+            else:
+                break
+        doc.set_toc(toc)
+        self.modified = True
+
+    def rename_toc_entry(self, pos: int, title: str) -> None:
+        doc = self._require()
+        toc = doc.get_toc(simple=True)
+        if not (0 <= pos < len(toc)):
+            raise ValueError("目次の項目が見つかりません。")
+        self._push_undo()
+        toc[pos][1] = title
+        doc.set_toc(toc)
+        self.modified = True
+
     # ------------------------------------------------------------ 保存
     def save(self, path: str | None = None) -> str:
         doc = self._require()
@@ -256,6 +361,18 @@ class PdfModel:
             scale = max_width / w
         mat = fitz.Matrix(scale, scale)
         return page.get_pixmap(matrix=mat, alpha=False)
+
+    def page_words(self, index: int) -> list[dict]:
+        """ページ上の単語一覧（読み順）。rect は表示座標。"""
+        doc = self._require()
+        page = doc[index]
+        rot = page.rotation_matrix
+        words = []
+        for x0, y0, x1, y1, text, block, line, wno in page.get_text("words"):
+            words.append({"rect": (fitz.Rect(x0, y0, x1, y1) * rot).normalize(), "text": text,
+                          "block": block, "line": line, "word": wno})
+        words.sort(key=lambda w: (w["block"], w["line"], w["word"]))
+        return words
 
     def page_info(self, index: int) -> str:
         page = self._require()[index]

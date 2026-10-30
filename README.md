@@ -14,6 +14,18 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 
 未対応: パスワード付き PDF、注釈・テキスト編集、印刷。
 
+### 閲覧の補助（表示モード・目次・しおり・付箋）
+- 表示モード（メニュー「表示 → 表示モード」）: ノーマル（白地）／暖色（薄いクリーム色 #FAF0DC）／白黒反転。選択は次回起動時に復元
+- 目次・しおりパネル（F9）: PDF に目次（索引・アウトライン）があれば自動で左に開き、クリックでそのページへ移動。自動で開くかは「しおり・付箋」メニューで切替
+- しおり: 「現在ページをしおりに追加」（Ctrl+D）で目次に追加。名前変更・削除も可。PDF のアウトラインとして保存されるので他のビューアでも見える
+- 付箋（F3）: 付箋モードでページをクリックするとメモ（テキスト注釈）を貼る。マウスを乗せると内容を表示、右クリックで編集・削除。PDF の注釈として保存され、Acrobat 等でも開ける。Ctrl+Z で取り消し可
+- 押印モードに入ると電子印鑑パネルが自動で開く
+- テキスト選択・コピー: 通常モードでページ上をドラッグすると文字を選択（青く強調）。Ctrl+C または右クリック「コピー」でクリップボードへ。文字の上では I ビームカーソル。Esc か余白クリックで解除
+
+### 追加のインポート経路
+- 「インポート」は JSON / .entstmp のほか、印影画像（PNG/JPG/BMP/GIF/TIFF/WebP、複数可）も受け付け、画像印として登録する。印鑑一覧へのドラッグ&ドロップでも可
+- アプリアイコン: `assets/icon.ico` / `assets/icon.png`（赤い角丸四角に白いリボン状の A。独自デザイン）。ウィンドウ・タスクバー・exe に適用
+
 ## 動作環境
 - Windows 10 / 11 (64bit)、Python 3.10 以上（exe 化後は Python 不要）
 - ライブラリ: PyMuPDF (AGPL-3.0)、PySide6 (LGPL-3.0)
@@ -42,6 +54,7 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 ## exe・インストーラーを自分で作る
 - ローカル: `build_windows.bat` をダブルクリック。`dist\PdfPageEditor.exe` ができ、Inno Setup 6 が入っていれば `dist\PdfPageEditor-Setup-x.y.z.exe` も作られる
 - GitHub Actions: `app.py` の `__version__` を上げてタグ `vX.Y.Z` を push すると、`.github/workflows/release.yml` が Windows でビルドし Releases に公開する
+- PyMuPDF 2.x は起動時にレイアウト解析モデルを読み込もうとするため、そのまま PyInstaller にかけると `layout_rf*.yaml` が見つからず起動に失敗する。本アプリでは不要なので `--exclude-module pymupdf.layout` 等で除外している（bat と workflow に設定済み。同梱したい場合は代わりに `--collect-data pymupdf` を付ける）
 
 ```
 git tag v1.1.0
@@ -53,9 +66,8 @@ git push origin v1.1.0
 - `stamps.py`   : 印影の定義・描画・ライブラリ保存（Qt 非依存）
 - `stamp_ui.py` : 印鑑パネルと印鑑編集ダイアログ
 - `app.py`      : PySide6 GUI 本体
-- `assets/icon.ico` : アプリアイコン（`assets/make_icon.py` で生成）
 - `installer/PdfPageEditor.iss` : Inno Setup のインストーラー定義
-- `tests/test_model.py`, `tests/test_stamps.py` : 自動テスト（直接実行）
+- `tests/test_model.py`, `tests/test_stamps.py`, `tests/test_notes_toc.py` : 自動テスト（直接実行）
 - `tests/test_e2e_gui.py` : GUI の E2E テスト（オフスクリーンで実際の画面を操作。`E2E_SHOTS=出力先` で各段階のスクリーンショットを保存）
 
 ## ライセンス注意
