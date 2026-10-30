@@ -21,6 +21,12 @@ from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
+
+
+def resource_path(rel: str) -> str:
+    """PyInstaller 同梱時は展開先、通常はスクリプトと同じフォルダを基準にする。"""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, rel)
 THUMB_W = 140
 PAGE_GAP = 12           # 連続表示でのページ間の余白 (px)
 ZOOM_STEPS = [0.5, 0.67, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0]
@@ -163,6 +169,9 @@ class MainWindow(QMainWindow):
         self.current = -1
         self.stamp_mode = False
         self.setWindowTitle(APP_NAME)
+        icon_file = resource_path(os.path.join("assets", "icon.ico"))
+        if os.path.exists(icon_file):
+            self.setWindowIcon(QIcon(icon_file))
         self.resize(1280, 820)
         self.setAcceptDrops(True)
         self._build_ui()
@@ -861,6 +870,9 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
+    icon_file = resource_path(os.path.join("assets", "icon.ico"))
+    if os.path.exists(icon_file):
+        app.setWindowIcon(QIcon(icon_file))
     w = MainWindow()
     w.show()
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):

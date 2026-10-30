@@ -14,6 +14,10 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 
 未対応: パスワード付き PDF、注釈・テキスト編集、印刷。
 
+### 追加のインポート経路
+- 「インポート」は JSON / .entstmp のほか、印影画像（PNG/JPG/BMP/GIF/TIFF/WebP、複数可）も受け付け、画像印として登録する。印鑑一覧へのドラッグ&ドロップでも可
+- アプリアイコン: `assets/icon.ico` / `assets/icon.png`（赤い角丸四角に白いリボン状の A。独自デザイン）。ウィンドウ・タスクバー・exe に適用
+
 ## 動作環境
 - Windows 10 / 11 (64bit)、Python 3.10 以上（exe 化後は Python 不要）
 - ライブラリ: PyMuPDF (AGPL-3.0)、PySide6 (LGPL-3.0)
@@ -31,7 +35,11 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 1. このフォルダを `C:\dev\pdf-page-editor` などに置く
 2. `run.bat` をダブルクリック（初回は仮想環境作成とライブラリ取得で数分）
 
-## exe 化（インストール用）
+## exe 化
+PyMuPDF 2.x は起動時にレイアウト解析モデルを読み込もうとするため、そのまま PyInstaller にかけると
+`layout_rf*.yaml` が見つからず起動に失敗する。本アプリでは不要なので `--exclude-module pymupdf.layout` で除外する
+（`build_windows.bat` に設定済み。同梱したい場合は代わりに `--collect-data pymupdf` を付ける）。
+（インストール用）
 1. `build_windows.bat` をダブルクリック
 2. `dist\PdfPageEditor.exe` が生成される。これ 1 ファイルを任意の場所に置けば動く
 3. 「PDF を開くプログラム」に関連付けすれば、ダブルクリックで開ける（引数 1 つ目を開く）

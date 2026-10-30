@@ -163,6 +163,37 @@ class StampEditDialog(QDialog):
             self.preview.setText("（画像未設定）" if s.kind == "image" else "")
 
 
+class StampList(QListWidget):
+    """画像 / JSON / .entstmp のドロップを受け付ける印鑑一覧。"""
+
+    files_dropped = Signal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        if e.mimeData().hasUrls():
+            paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+            if paths:
+                self.files_dropped.emit(paths)
+            e.acceptProposedAction()
+        else:
+            super().dropEvent(e)
+
+
 class StampDock(QWidget):
     """印鑑一覧 + 押印設定。押印モードの ON/OFF は stamp_mode_changed で通知。"""
 
@@ -174,10 +205,11 @@ class StampDock(QWidget):
         root = QVBoxLayout(self)
         root.setContentsMargins(4, 4, 4, 4)
 
-        self.list = QListWidget()
+        self.list = StampList(self)
+        self.list.files_dropped.connect(self.import_paths)
         self.list.setIconSize(QSize(64, 64))
         self.list.itemDoubleClicked.connect(lambda _: self.edit_stamp())
-        self.list.setToolTip("印鑑の一覧。クリックで押す印鑑を選択、ダブルクリックで編集")
+        self.list.setToolTip("印鑑の一覧。クリックで押す印鑑を選択、ダブルクリックで編集。画像・JSON・.entstmp をここにドロップすると取り込めます")
         root.addWidget(self.list, 1)
 
         grid = QGridLayout()
@@ -188,7 +220,7 @@ class StampDock(QWidget):
             ("削除", self.del_stamp, "選択中の印鑑を一覧から削除"),
             ("画像から", self.from_image, "スキャンした印影や手書きサインの画像を読み込んで印鑑にする（白地は自動で透過）"),
             ("PNG保存", self.export_png, "選択中の印影を透過 PNG 画像として保存（Excel や Word に貼る用）"),
-            ("インポート", self.import_json, "印鑑データを読み込む。本アプリの JSON のほか、おまかせ電子印鑑の .entstmp も可（複数選択可）"),
+            ("インポート", self.import_json, "印鑑データ(JSON)、おまかせ電子印鑑の .entstmp、印影画像(PNG/JPG など)を読み込む（複数選択可）。一覧へのドロップでも可"),
             ("エクスポート", self.export_json, "印鑑データを JSON ファイルに書き出す（バックアップ・別 PC への移行用）"),
         ]
         for i, (t, fn, tip) in enumerate(btns):
@@ -290,22 +322,54 @@ class StampDock(QWidget):
         except Exception as e:
             QMessageBox.critical(self, "エラー", str(e))
 
+    IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp")
+    IMPORT_FILTER = ("印鑑データ / 画像 (*.json *.entstmp *.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp);;"
+                     "本アプリの JSON (*.json);;おまかせ電子印鑑 (*.entstmp);;"
+                     "印影画像 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp)")
+
     def import_json(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "印鑑データをインポート", "",
-            "印鑑データ (*.json *.entstmp);;本アプリの JSON (*.json);;おまかせ電子印鑑 (*.entstmp)")
-        if not paths:
-            return
+        paths, _ = QFileDialog.getOpenFileNames(self, "印鑑データ・印影画像をインポート", "", self.IMPORT_FILTER)
+        if paths:
+            self.import_paths(paths)
+
+    def import_paths(self, paths: list[str]):
+        """JSON / .entstmp は印鑑データとして、画像は画像印として取り込む（複数可）。"""
+        images = [p for p in paths if p.lower().endswith(self.IMAGE_EXTS)]
+        data_files = [p for p in paths if p not in images]   # JSON / .entstmp（それ以外は読込失敗として一覧に出す）
         n, failed = 0, []
-        for path in paths:
+        last_id = None
+        for path in data_files:
             try:
                 n += self.lib.import_file(path)
             except Exception as e:
                 failed.append(f"{os.path.basename(path)}: {e}")
-        self.refresh()
+        knock = None
+        for path in images:
+            if knock is None:
+                knock = QMessageBox.question(
+                    self, "白地の透過",
+                    "画像の白い背景を透明にしますか？（スキャン画像向け。透過 PNG なら「いいえ」）",
+                    QMessageBox.Yes | QMessageBox.No) == QMessageBox.Yes
+            try:
+                png = image_to_stamp_png(path, knockout_white=knock)
+            except Exception as e:
+                failed.append(f"{os.path.basename(path)}: {e}")
+                continue
+            s = Stamp(name=os.path.splitext(os.path.basename(path))[0], kind="image", size_mm=15,
+                      image_b64=base64.b64encode(png).decode("ascii"))
+            self.lib.stamps.append(s)
+            last_id = s.id
+            n += 1
+        if images:
+            self.lib.save()
+        self.refresh(last_id)
+        if not paths:
+            return
         msg = f"{n} 件を取り込みました。"
-        if any(p.lower().endswith(".entstmp") for p in paths):
+        if any(p.lower().endswith(".entstmp") for p in data_files):
             msg += "\n.entstmp には大きさが記録されていないため 15 mm で登録しました。「編集」で直せます。"
+        if images:
+            msg += "\n画像は 15 mm の画像印として登録しました。「編集」で名前や大きさを直せます。"
         if failed:
             msg += "\n\n読み込めなかったファイル:\n" + "\n".join(failed)
         QMessageBox.information(self, "インポート", msg)
