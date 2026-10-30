@@ -51,7 +51,7 @@ def main():
     assert m.get_toc()[0] == [1, "1-1", 2], "子項目は繰り上がる"
     m.undo(); m.undo(); assert len(m.get_toc()) == 3
     m.doc[1].set_rotation(90)
-    x = m.add_note(1, (300, 100), "確認", "安藤")
+    x = m.add_note(1, (300, 100), "確認", "山田")
     assert m.note_at(1, (305, 105))["xref"] == x and m.note_at(1, (10, 10)) is None
     m.update_note(1, x, "済"); assert m.notes_on_page(1)[0]["text"] == "済"
     m.remove_note(1, x); assert m.notes_on_page(1) == []

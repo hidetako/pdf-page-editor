@@ -70,5 +70,7 @@ git push origin v1.1.0
 - `tests/test_model.py`, `tests/test_stamps.py`, `tests/test_notes_toc.py` : 自動テスト（直接実行）
 - `tests/test_e2e_gui.py` : GUI の E2E テスト（オフスクリーンで実際の画面を操作。`E2E_SHOTS=出力先` で各段階のスクリーンショットを保存）
 
-## ライセンス注意
-PyMuPDF は AGPL-3.0 のため、本アプリを配布する場合はソース公開義務が生じる（社内利用・個人利用なら問題なし）。
+## ライセンス
+本ソフトウェアは [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0) で公開する。
+PyMuPDF が AGPL-3.0 のため、本アプリも同ライセンスとなる（PySide6 は LGPL-3.0）。
+改変して配布・ネットワーク提供する場合は、同じライセンスでソースを公開する義務がある。社内利用・個人利用に制限はない。

@@ -96,7 +96,7 @@ def main():
     pix = fitz.open("pdf", scan_png)[0].get_pixmap(dpi=72)
     opaque = pix.tobytes("png"); assert not fitz.Pixmap(opaque).alpha
     alpha_png = image_to_stamp_png(img)
-    ent = os.path.join(tmp, "安藤印.entstmp")
+    ent = os.path.join(tmp, "印影A.entstmp")
     with open(ent, "w", encoding="utf-8-sig") as f:
         f.write('<?xml version="1.0" encoding="utf-8" standalone="yes"?>\n'
                 '<ENTSTMP product="EntrustStampForBusiness" version="1.0.2">\n  <stampEntities>\n'
@@ -108,7 +108,7 @@ def main():
     n3 = len(lib3.stamps)
     assert lib3.import_file(ent) == 2 and len(lib3.stamps) == n3 + 2
     s1, s2 = lib3.stamps[-2:]
-    assert s1.name == "安藤印 1" and s2.name == "安藤印 2" and s1.kind == s2.kind == "image" and s1.size_mm == 15
+    assert s1.name == "印影A 1" and s2.name == "印影A 2" and s1.kind == s2.kind == "image" and s1.size_mm == 15
     assert s1.recolor and [round(c * 255) for c in s1.color] == [0xD8, 0x00, 0x16], "col 属性が印色になる"
     assert s2.recolor and s2.color == list(default_stamps()[0].color), "col なしは既定の朱色"
     # グレーのマスク画像でも col の色で描かれる（元ソフトと同じ見え方）
