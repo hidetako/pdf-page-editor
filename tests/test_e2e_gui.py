@@ -316,8 +316,8 @@ def main():
     def fake_popup(menu, gpos):  # QMenu.exec はオフスクリーンでも実際にブロックするので差し替える
         acts = [x for x in menu.actions() if not x.isSeparator()]
         picked.append([(x.text(), x.isEnabled()) for x in acts])
-        for x in acts:
-            if x.isEnabled():
+        for x in acts:  # 押印に関する項目だけを対象にする（付箋・しおりの項目はダイアログを開くため）
+            if x.isEnabled() and "押印" in x.text():
                 x.trigger(); break
     win._popup_menu = fake_popup
     QApplication.sendEvent(win.pages_widget, QContextMenuEvent(QContextMenuEvent.Mouse, QPoint(1, 1), win.pages_widget.mapToGlobal(QPoint(1, 1)))); wait()
