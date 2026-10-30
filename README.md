@@ -71,6 +71,11 @@ git push origin v1.1.0
 - `tests/test_e2e_gui.py` : GUI の E2E テスト（オフスクリーンで実際の画面を操作。`E2E_SHOTS=出力先` で各段階のスクリーンショットを保存）
 
 ## ライセンス
-本ソフトウェアは [GNU Affero General Public License v3.0](LICENSE) (AGPL-3.0) で公開する。
-PyMuPDF が AGPL-3.0 のため、本アプリも同ライセンスとなる（PySide6 は LGPL-3.0）。
-改変して配布・ネットワーク提供する場合は、同じライセンスでソースを公開する義務がある。社内利用・個人利用に制限はない。
+Copyright (c) 2026 [Yorozu Solutions](https://www.yorozusolutions.com/)
+
+本ソフトウェアのソースコードは [MIT License](LICENSE) で公開する。
+
+使用ライブラリのライセンスは次のとおり。配布用 exe には PyMuPDF が同梱されるため、exe を再配布・改変配布する場合は
+AGPL-3.0 の条件（対応するソースコードの公開）に従うこと。本リポジトリを公開しているのはそのためでもある。社内利用・個人利用に制限はない。
+- PyMuPDF: AGPL-3.0（または Artifex 商用ライセンス）
+- PySide6: LGPL-3.0

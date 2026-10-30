@@ -546,6 +546,7 @@ class MainWindow(QMainWindow):
         QMessageBox.about(self, f"{APP_NAME} について",
                           f"<b>{APP_NAME}</b> {__version__}<br><br>"
                           "PDF の閲覧・ページ編集・電子印鑑ツール。<br>"
+                          "Copyright (c) 2026 <a href='https://www.yorozusolutions.com/'>Yorozu Solutions</a> (MIT License)<br>"
                           "最新版: <a href='https://github.com/hidetako/pdf-page-editor/releases'>GitHub Releases</a><br><br>"
                           "使用ライブラリ: PyMuPDF (AGPL-3.0), PySide6 (LGPL-3.0)")
 

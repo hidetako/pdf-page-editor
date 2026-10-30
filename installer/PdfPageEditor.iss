@@ -13,8 +13,9 @@ AppId={{7C2B5C1E-5B4E-4D5A-9C3F-2E1A7F0D8B21}
 AppName={#AppName}
 AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
-AppPublisher=hidetako
-AppPublisherURL=https://github.com/hidetako/pdf-page-editor
+AppPublisher=Yorozu Solutions
+AppPublisherURL=https://www.yorozusolutions.com/
+AppCopyright=Copyright (c) 2026 Yorozu Solutions
 AppSupportURL=https://github.com/hidetako/pdf-page-editor/issues
 AppUpdatesURL=https://github.com/hidetako/pdf-page-editor/releases
 ; 管理者権限なしでユーザー領域にインストール（UAC が出ない。全ユーザー向けは選択可）
