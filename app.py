@@ -22,6 +22,7 @@ from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
+__version__ = "1.1.0"
 
 
 def resource_path(rel: str) -> str:
@@ -41,6 +42,11 @@ DISPLAY_MODES = {
 WARM_TINT = np.array([250, 240, 220], dtype=np.float32) / 255.0   # 白 → #FAF0DC
 NOTE_HIT_PAD = 4.0   # 付箋アイコンのクリック判定を広げる量 (pt)
 INSERT_FILTER = "PDF / 画像 (*.pdf *.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp);;PDF (*.pdf);;画像 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp)"
+
+
+def app_icon() -> QIcon:
+    icon_file = resource_path(os.path.join("assets", "icon.ico"))
+    return QIcon(icon_file) if os.path.exists(icon_file) else QIcon()
 
 
 def apply_display_mode(pix: fitz.Pixmap, mode: str) -> QImage:
@@ -254,9 +260,7 @@ class MainWindow(QMainWindow):
         self.sel_range: tuple[int, int] | None = None   # 選択した単語の範囲 (start, end) 読み順
         self.selected_text = ""
         self.setWindowTitle(APP_NAME)
-        icon_file = resource_path(os.path.join("assets", "icon.ico"))
-        if os.path.exists(icon_file):
-            self.setWindowIcon(QIcon(icon_file))
+        self.setWindowIcon(app_icon())
         self.resize(1280, 820)
         self.setAcceptDrops(True)
         self._build_ui()
@@ -364,6 +368,7 @@ class MainWindow(QMainWindow):
         vmenu = self.menuBar().addMenu("表示(&V)")
         smenu = self.menuBar().addMenu("印鑑(&S)")
         bmenu = self.menuBar().addMenu("しおり・付箋(&B)")
+        hmenu = self.menuBar().addMenu("ヘルプ(&H)")
 
         def act(text, slot, key=None, menu=None, toolbar=True, icon=None, tip=None):
             a = QAction(text, self)
@@ -415,6 +420,7 @@ class MainWindow(QMainWindow):
         self.stamp_dock.visibilityChanged.connect(a_dock.setChecked)
         # メニュー/ツールバーに載せないアクションは、ウィンドウに addAction しないとショートカットが効かない
         self.addAction(act("キャンセル（押印・付箋モード終了）", self._cancel_modes, "Esc", None, toolbar=False))
+        act("バージョン情報", self.show_about, None, hmenu, toolbar=False)
 
         tb.addSeparator()
         self.a_note = act("付箋", self._toggle_note_mode, "F3", bmenu, icon="note", tip="ON にしてページ上をクリックすると、その位置にメモ（付箋）を貼ります。Esc で終了。付箋は右クリックで編集・削除")
@@ -535,6 +541,13 @@ class MainWindow(QMainWindow):
         auto = s.value("auto_toc_panel", True)
         self.auto_toc_panel = auto in (True, "true", "True", 1, "1")
         self.a_auto_toc.setChecked(self.auto_toc_panel)
+
+    def show_about(self):
+        QMessageBox.about(self, f"{APP_NAME} について",
+                          f"<b>{APP_NAME}</b> {__version__}<br><br>"
+                          "PDF の閲覧・ページ編集・電子印鑑ツール。<br>"
+                          "最新版: <a href='https://github.com/hidetako/pdf-page-editor/releases'>GitHub Releases</a><br><br>"
+                          "使用ライブラリ: PyMuPDF (AGPL-3.0), PySide6 (LGPL-3.0)")
 
     def _error(self, e: Exception):
         QMessageBox.critical(self, APP_NAME, f"エラー: {e}")
@@ -1345,9 +1358,8 @@ class MainWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
-    icon_file = resource_path(os.path.join("assets", "icon.ico"))
-    if os.path.exists(icon_file):
-        app.setWindowIcon(QIcon(icon_file))
+    app.setApplicationVersion(__version__)
+    app.setWindowIcon(app_icon())
     w = MainWindow()
     w.show()
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
