@@ -662,6 +662,61 @@ def main():
     assert w7.display_mode == "normal"
     assert w7.close()
 
+    step("テキスト選択: ドラッグで文字を選択 → 強調表示、Ctrl+C でコピー、右クリックに「コピー」、Esc で解除")
+    sel_pdf = os.path.join(_TMP, "sel.pdf")
+    _d = fitz.open(); _pg = _d.new_page(width=595, height=842)
+    _pg.insert_text((72, 100), "Hello World from PDF", fontsize=24)
+    _pg.insert_text((72, 160), "稟議書 承認済み", fontsize=24, fontname="japan")
+    _pg.insert_text((72, 220), "second line here", fontsize=24)
+    _d.save(sel_pdf); _d.close()
+    w8 = MainWindow(); w8.resize(1400, 900); w8.show(); wait(50)
+    w8.open_file(sel_pdf); wait(150)
+    words = w8.model.page_words(0)
+    assert [w["text"] for w in words][:4] == ["Hello", "World", "from", "PDF"], [w["text"] for w in words]
+    v = w8.view; ox, oy, pw, ph = v.pix_geometry(); pr = w8.model.doc[0].rect
+    def to_widget(r, fx=0.5, fy=0.5):
+        return QPoint(int(ox + (r.x0 + (r.x1 - r.x0) * fx) * pw / pr.width), int(oy + (r.y0 + (r.y1 - r.y0) * fy) * ph / pr.height))
+    # "World" から "second" までドラッグ（2 行またぎ、日本語行を含む）
+    start = to_widget(words[1]["rect"]); end = to_widget(words[-3]["rect"])
+    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, start); wait()
+    QTest.mouseMove(v, QPoint(start.x() + 40, start.y() + 30)); wait()
+    QTest.mouseMove(v, end); wait()
+    QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, end); wait(100)
+    assert w8.sel_range is not None and len(v.selection_rects) >= 5, (w8.sel_range, len(v.selection_rects))
+    assert w8.selected_text == "World from PDF\n稟議書 承認済み\nsecond", repr(w8.selected_text)
+    assert w8.a_copy.isEnabled() and "選択中" in w8.statusBar().currentMessage()
+    shot(w8, "text_selected")
+    QApplication.clipboard().setText("")
+    QTest.keyClick(w8, Qt.Key_C, Qt.ControlModifier); wait(100)
+    assert QApplication.clipboard().text() == w8.selected_text, repr(QApplication.clipboard().text())
+    assert "コピーしました" in w8.statusBar().currentMessage()
+    # 右クリックメニューの先頭に「コピー」
+    menu_items = []
+    w8._popup_menu = lambda menu, gpos: menu_items.append([x.text() for x in menu.actions() if not x.isSeparator()])
+    from PySide6.QtGui import QContextMenuEvent as _CME2
+    QApplication.sendEvent(v, _CME2(_CME2.Mouse, end, v.mapToGlobal(end))); wait()
+    assert menu_items[-1][0] == "コピー", menu_items[-1]
+    # 余白をクリックすると選択解除、文字の上では I ビーム
+    blank = QPoint(int(ox + pw * 0.5), int(oy + ph * 0.8))
+    QTest.mouseClick(v, Qt.LeftButton, Qt.NoModifier, blank); wait(100)
+    assert w8.selected_text == "" and not v.selection_rects and not w8.a_copy.isEnabled()
+    QTest.mouseMove(v, to_widget(words[0]["rect"])); wait(100)
+    assert v.cursor().shape() == Qt.IBeamCursor
+    QTest.mouseMove(v, blank); wait(100)
+    assert v.cursor().shape() == Qt.ArrowCursor
+    # 1 単語だけの選択 → Esc で解除。押印モード中はドラッグしても選択されない
+    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, to_widget(words[0]["rect"], 0.2)); wait()
+    QTest.mouseMove(v, to_widget(words[0]["rect"], 0.9)); wait()
+    QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, to_widget(words[0]["rect"], 0.9)); wait(100)
+    assert w8.selected_text == "Hello", repr(w8.selected_text)
+    QTest.keyClick(w8, Qt.Key_Escape); wait()
+    assert w8.selected_text == "" and not v.selection_rects
+    w8.stamp_dock_widget.list.setCurrentRow(0); w8.a_stamp.trigger(); wait()
+    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, start); QTest.mouseMove(v, end); QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, end); wait(150)
+    assert w8.selected_text == "" and len(w8.model.stamps_on_page(0)) == 1, "押印モードのドラッグは押印になる"
+    QTest.keyClick(w8, Qt.Key_Escape); wait()
+    w8.model.modified = False; assert w8.close()
+
     step("変更なしで開き直し: 確認ダイアログは出ない")
     asked = []
     QMessageBox.question = staticmethod(lambda *a_, **k: asked.append(1) or QMessageBox.Cancel)

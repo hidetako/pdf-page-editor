@@ -362,6 +362,18 @@ class PdfModel:
         mat = fitz.Matrix(scale, scale)
         return page.get_pixmap(matrix=mat, alpha=False)
 
+    def page_words(self, index: int) -> list[dict]:
+        """ページ上の単語一覧（読み順）。rect は表示座標。"""
+        doc = self._require()
+        page = doc[index]
+        rot = page.rotation_matrix
+        words = []
+        for x0, y0, x1, y1, text, block, line, wno in page.get_text("words"):
+            words.append({"rect": (fitz.Rect(x0, y0, x1, y1) * rot).normalize(), "text": text,
+                          "block": block, "line": line, "word": wno})
+        words.sort(key=lambda w: (w["block"], w["line"], w["word"]))
+        return words
+
     def page_info(self, index: int) -> str:
         page = self._require()[index]
         r = page.rect

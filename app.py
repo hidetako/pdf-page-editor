@@ -10,7 +10,7 @@ import sys
 import numpy as np
 import pymupdf as fitz
 from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QSettings, QSize, Qt, QTimer, Signal
-from PySide6.QtGui import (QAction, QActionGroup, QDragEnterEvent, QDropEvent, QIcon, QImage,
+from PySide6.QtGui import (QAction, QActionGroup, QColor, QDragEnterEvent, QDropEvent, QIcon, QImage,
                            QKeySequence, QPainter, QPixmap)
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -105,6 +105,9 @@ class PageView(QLabel):
     clicked = Signal(int, QPointF)  # ページ番号, ページ内の相対座標 (0〜1)
     context_requested = Signal(int, QPointF, QPoint)  # 右クリック: ページ番号, 相対座標, 画面座標
     hovered = Signal(int, QPointF, QPoint)  # マウス移動: ページ番号, 相対座標, 画面座標（付箋のツールチップ用）
+    drag_started = Signal(int, QPointF)      # 通常モードの左ドラッグ開始（テキスト選択）
+    drag_moved = Signal(int, QPointF)
+    drag_finished = Signal(int, QPointF)
 
     def __init__(self, index: int):
         super().__init__()
@@ -117,6 +120,12 @@ class PageView(QLabel):
         self.ghost_pos: QPointF | None = None
         self.stamp_mode = False
         self.note_mode = False
+        self.selection_rects: list[tuple[float, float, float, float]] = []   # 選択強調（相対座標 0〜1）
+        self._dragging = False
+
+    def set_selection(self, rects: list[tuple[float, float, float, float]]):
+        self.selection_rects = rects
+        self.update()
 
     def set_background(self, color: str):
         self.setStyleSheet(f"background:{color};")
@@ -146,14 +155,29 @@ class PageView(QLabel):
         ph = pm.height() / pm.devicePixelRatio()
         return (self.width() - pw) / 2, (self.height() - ph) / 2, pw, ph
 
+    def _frac_clamped(self, pos) -> QPointF:
+        g = self.pix_geometry() or (0.0, 0.0, float(max(1, self.width())), float(max(1, self.height())))
+        ox, oy, pw, ph = g
+        return QPointF(min(1.0, max(0.0, (pos.x() - ox) / pw)), min(1.0, max(0.0, (pos.y() - oy) / ph)))
+
     def mouseMoveEvent(self, e):
         if self.stamp_mode:
             self.ghost_pos = e.position()
             self.update()
-        f = self._frac(e.position())
-        if f is not None:
-            self.hovered.emit(self.index, f, e.globalPosition().toPoint())
+        if self._dragging and (e.buttons() & Qt.LeftButton):
+            self.drag_moved.emit(self.index, self._frac_clamped(e.position()))
+        else:
+            f = self._frac(e.position())
+            if f is not None:
+                self.hovered.emit(self.index, f, e.globalPosition().toPoint())
         super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self._dragging and e.button() == Qt.LeftButton:
+            self._dragging = False
+            self.drag_finished.emit(self.index, self._frac_clamped(e.position()))
+            return
+        super().mouseReleaseEvent(e)
 
     def leaveEvent(self, e):
         self.ghost_pos = None
@@ -176,6 +200,12 @@ class PageView(QLabel):
             if f is not None:
                 self.clicked.emit(self.index, f)
                 return
+        if e.button() == Qt.LeftButton:
+            f = self._frac(e.position())
+            if f is not None:
+                self._dragging = True
+                self.drag_started.emit(self.index, f)
+                return
         super().mousePressEvent(e)
 
     def contextMenuEvent(self, e):
@@ -188,6 +218,16 @@ class PageView(QLabel):
 
     def paintEvent(self, e):
         super().paintEvent(e)
+        if self.selection_rects:
+            g = self.pix_geometry()
+            if g:
+                ox, oy, pw, ph = g
+                p = QPainter(self)
+                p.setPen(Qt.NoPen)
+                p.setBrush(QColor(30, 120, 255, 90))
+                for x0, y0, x1, y1 in self.selection_rects:
+                    p.drawRect(int(ox + x0 * pw), int(oy + y0 * ph), max(1, int((x1 - x0) * pw)), max(1, int((y1 - y0) * ph)))
+                p.end()
         if self.stamp_mode and self.ghost and self.ghost_pos is not None:
             p = QPainter(self)
             p.setOpacity(0.6)
@@ -208,6 +248,11 @@ class MainWindow(QMainWindow):
         self.note_mode = False
         self.display_mode = "normal"
         self.auto_toc_panel = True
+        self._words_cache: dict[int, list[dict]] = {}
+        self.sel_page: int | None = None          # テキスト選択中のページ
+        self.sel_anchor: tuple[float, float] | None = None
+        self.sel_range: tuple[int, int] | None = None   # 選択した単語の範囲 (start, end) 読み順
+        self.selected_text = ""
         self.setWindowTitle(APP_NAME)
         icon_file = resource_path(os.path.join("assets", "icon.ico"))
         if os.path.exists(icon_file):
@@ -346,6 +391,9 @@ class MainWindow(QMainWindow):
         act("終了", self.close, "Ctrl+Q", fmenu, toolbar=False)
 
         tb.addSeparator()
+        self.a_copy = act("コピー", self.copy_selection, "Ctrl+C", emenu, toolbar=False, icon="edit-copy", tip="ページ上でドラッグして選択した文字をクリップボードにコピー")
+        self.a_copy.setEnabled(False)
+        emenu.addSeparator()
         self.a_undo = act("元に戻す", self.undo, "Ctrl+Z", emenu, icon="edit-undo", tip="直前の操作（並べ替え・回転・削除・挿入・押印）を取り消す")
         self.a_redo = act("やり直し", self.redo, "Ctrl+Y", emenu, icon="edit-redo", tip="取り消した操作をもう一度実行する")
         emenu.addSeparator()
@@ -629,6 +677,7 @@ class MainWindow(QMainWindow):
     def _cancel_modes(self):
         self._set_stamp_mode(False)
         self._set_note_mode(False)
+        self.clear_selection()
 
     def _toggle_note_mode(self, on: bool):
         self._set_note_mode(on)
@@ -746,6 +795,9 @@ class MainWindow(QMainWindow):
         xref = self.model.stamp_at(index, pt)
         note = self._note_hit(index, pt)
         menu = QMenu(self)
+        if self.selected_text and self.sel_page == index:
+            menu.addAction("コピー", self.copy_selection)
+            menu.addSeparator()
         if note is not None:
             menu.addAction("付箋を編集...", lambda: self.edit_note(index, note))
             menu.addAction("付箋を削除", lambda: self.remove_note(index, note["xref"]))
@@ -778,12 +830,110 @@ class MainWindow(QMainWindow):
         """付箋の上にマウスが来たら内容をツールチップで出す。"""
         if self.model.doc is None or not (0 <= index < self.model.page_count):
             return
-        note = self._note_hit(index, self._page_point(index, frac))
+        pt = self._page_point(index, frac)
+        note = self._note_hit(index, pt)
+        v = self.views[index]
+        if not (v.stamp_mode or v.note_mode):
+            over_text = any(w["rect"].contains(fitz.Point(*pt)) for w in self._words(index))
+            v.setCursor(Qt.IBeamCursor if over_text and note is None else Qt.ArrowCursor)
         if note is None:
             QToolTip.hideText()
             return
         head = f"【{note['title']}】" if note["title"] else ""
-        QToolTip.showText(gpos, f"{head}{note['text']}", self.views[index])
+        QToolTip.showText(gpos, f"{head}{note['text']}", v)
+
+    # ------------------------------------------------------------ テキスト選択・コピー
+    def _words(self, index: int) -> list[dict]:
+        if index not in self._words_cache:
+            try:
+                self._words_cache[index] = self.model.page_words(index)
+            except Exception:
+                self._words_cache[index] = []
+        return self._words_cache[index]
+
+    def _nearest_word(self, index: int, pt: tuple[float, float]) -> int | None:
+        """表示座標 pt に最も近い単語の番号（読み順）。行のずれを横ずれより重く見る。"""
+        words = self._words(index)
+        if not words:
+            return None
+        px, py = pt
+        best, best_d = None, None
+        for i, w in enumerate(words):
+            r = w["rect"]
+            dy = 0.0 if r.y0 <= py <= r.y1 else min(abs(py - r.y0), abs(py - r.y1))
+            dx = 0.0 if r.x0 <= px <= r.x1 else min(abs(px - r.x0), abs(px - r.x1))
+            d = dy * 4 + dx
+            if best_d is None or d < best_d:
+                best, best_d = i, d
+        return best
+
+    def _on_drag_started(self, index: int, frac: QPointF):
+        self.clear_selection()
+        self.sel_page = index
+        self.sel_anchor = self._page_point(index, frac)
+        self._set_current(index)
+
+    def _on_drag_moved(self, index: int, frac: QPointF):
+        if self.sel_page is None or index != self.sel_page or self.sel_anchor is None:
+            return
+        self._update_selection(self._page_point(index, frac))
+
+    def _on_drag_finished(self, index: int, frac: QPointF):
+        if self.sel_page is None or index != self.sel_page:
+            return
+        self._update_selection(self._page_point(index, frac))
+        if self.selected_text:
+            n = len(self.selected_text)
+            self.statusBar().showMessage(f"{n} 文字を選択中。Ctrl+C でコピー、右クリックでも可", 4000)
+
+    def _update_selection(self, pt: tuple[float, float]):
+        index = self.sel_page
+        a = self._nearest_word(index, self.sel_anchor)
+        b = self._nearest_word(index, pt)
+        if a is None or b is None:
+            return
+        lo, hi = (a, b) if a <= b else (b, a)
+        words = self._words(index)
+        # 開始点・終了点が同じ単語で、その単語の上にもいない場合（余白クリック）は選択なし
+        if lo == hi and not words[lo]["rect"].contains(fitz.Point(*pt)) and not words[lo]["rect"].contains(fitz.Point(*self.sel_anchor)):
+            self.views[index].set_selection([])
+            self.sel_range = None; self.selected_text = ""
+            self.a_copy.setEnabled(False)
+            return
+        self.sel_range = (lo, hi)
+        pr = self.model.doc[index].rect
+        rects = [(w["rect"].x0 / pr.width, w["rect"].y0 / pr.height, w["rect"].x1 / pr.width, w["rect"].y1 / pr.height)
+                 for w in words[lo:hi + 1]]
+        self.views[index].set_selection(rects)
+        self.selected_text = self._join_words(words[lo:hi + 1])
+        self.a_copy.setEnabled(bool(self.selected_text))
+
+    @staticmethod
+    def _join_words(words: list[dict]) -> str:
+        """単語を文章に戻す。行が変われば改行。同じ行の単語境界は元の PDF に空白があった箇所なので空白で結ぶ
+        （日本語の続き文字は MuPDF が 1 単語として返すため、ここで空白が増えることはない）。"""
+        out = []
+        prev = None
+        for w in words:
+            if prev is not None:
+                out.append("\n" if (w["block"], w["line"]) != (prev["block"], prev["line"]) else " ")
+            out.append(w["text"])
+            prev = w
+        return "".join(out)
+
+    def clear_selection(self):
+        if self.sel_page is not None and 0 <= self.sel_page < len(self.views):
+            self.views[self.sel_page].set_selection([])
+        self.sel_page = None; self.sel_anchor = None; self.sel_range = None
+        self.selected_text = ""
+        if hasattr(self, "a_copy"):
+            self.a_copy.setEnabled(False)
+
+    def copy_selection(self):
+        if not self.selected_text:
+            return
+        QApplication.clipboard().setText(self.selected_text)
+        self.statusBar().showMessage(f"{len(self.selected_text)} 文字をコピーしました", 4000)
 
     # ------------------------------------------------------------ 付箋
     def _ask_text(self, title: str, label: str, default: str = "") -> str | None:
@@ -961,6 +1111,9 @@ class MainWindow(QMainWindow):
         else:
             self.current = -1
         self.thumbs.blockSignals(False)
+        self._words_cache.clear()
+        self.sel_page = None; self.sel_range = None; self.selected_text = ""
+        self.a_copy.setEnabled(False)
         self._rebuild_views()
         self.refresh_toc()
         self._update_actions()
@@ -989,6 +1142,9 @@ class MainWindow(QMainWindow):
             v.clicked.connect(self._on_page_clicked)
             v.context_requested.connect(self._on_page_context)
             v.hovered.connect(self._on_page_hovered)
+            v.drag_started.connect(self._on_drag_started)
+            v.drag_moved.connect(self._on_drag_moved)
+            v.drag_finished.connect(self._on_drag_finished)
             self.pages_layout.addWidget(v)
             self.views.append(v)
         self._layout_pages()
