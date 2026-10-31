@@ -53,13 +53,9 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 
 ## exe・インストーラーを自分で作る
 - ローカル: `build_windows.bat` をダブルクリック。`dist\PdfPageEditor.exe` ができ、Inno Setup 6 が入っていれば `dist\PdfPageEditor-Setup-x.y.z.exe` も作られる
-- GitHub Actions: `app.py` の `__version__` を上げてタグ `vX.Y.Z` を push すると、`.github/workflows/release.yml` が Windows でビルドし Releases に公開する
+- GitHub Actions: `app.py` の `__version__` を上げて `main` にマージすると、`.github/workflows/release.yml` が Windows でテスト・ビルドし、タグ `vX.Y.Z` を打って Releases に公開する（同じバージョンのタグがすでにあればビルドのみ）
 - PyMuPDF 2.x は起動時にレイアウト解析モデルを読み込もうとするため、そのまま PyInstaller にかけると `layout_rf*.yaml` が見つからず起動に失敗する。本アプリでは不要なので `--exclude-module pymupdf.layout` 等で除外している（bat と workflow に設定済み。同梱したい場合は代わりに `--collect-data pymupdf` を付ける）
 
-```
-git tag v1.1.0
-git push origin v1.1.0
-```
 
 ## 構成
 - `pdfmodel.py` : PyMuPDF をラップした編集ロジック（Qt 非依存、単体テスト可）

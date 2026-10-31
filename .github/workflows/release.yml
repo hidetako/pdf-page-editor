@@ -1,10 +1,13 @@
 name: Windows installer
 
-# タグ v1.2.3 を push すると、exe とインストーラーをビルドして GitHub Releases に公開する。
-# 手動実行 (workflow_dispatch) では Artifacts にだけ残す。
+# main への push: テスト → exe とインストーラーをビルド。app.py の __version__ に対応するタグ vX.Y.Z が
+# まだ無ければ、そのコミットにタグを打って GitHub Releases に公開する（= バージョンを上げてマージすれば自動リリース）。
+# タグ vX.Y.Z の push: そのタグでビルドして Releases に公開（手動リリース用）。
+# 手動実行 (workflow_dispatch): ビルドして Artifacts に残すだけ。
 
 on:
   push:
+    branches: ["main"]
     tags: ["v*"]
   workflow_dispatch:
 
@@ -16,6 +19,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -38,20 +43,29 @@ jobs:
           python tests/test_notes_toc.py
           python tests/test_e2e_gui.py
 
-      - name: Determine version
+      - name: Determine version and whether to publish
         id: ver
         shell: bash
         run: |
+          app_version=$(python -c "import re; print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('app.py', encoding='utf-8').read()).group(1))")
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            v="${GITHUB_REF#refs/tags/v}"
+            v="${GITHUB_REF#refs/tags/v}"; publish=true
+          elif [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            v="$app_version"
+            if git ls-remote --exit-code --tags origin "refs/tags/v$v" >/dev/null 2>&1; then
+              echo "tag v$v already exists: build only"; publish=false
+            else
+              publish=true
+            fi
           else
-            v="0.0.0-dev.${GITHUB_SHA::7}"
+            v="$app_version-dev.${GITHUB_SHA::7}"; publish=false
           fi
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          echo "version: $v"
+          echo "publish=$publish" >> "$GITHUB_OUTPUT"
+          echo "version: $v  publish: $publish"
 
       - name: Build exe (PyInstaller)
-                # PyMuPDF 2.x のレイアウト解析モデルは不要なので除外（同梱すると起動時に layout_rf*.yaml を探して失敗する）
+        # PyMuPDF 2.x のレイアウト解析モデルは不要なので除外（同梱すると起動時に layout_rf*.yaml を探して失敗する）
         run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
 
       - name: Build installer (Inno Setup)
@@ -68,9 +82,11 @@ jobs:
             dist/PdfPageEditor.exe
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.ver.outputs.publish == 'true'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ steps.ver.outputs.version }}
+          target_commitish: ${{ github.sha }}
           name: PDF Page Editor ${{ steps.ver.outputs.version }}
           generate_release_notes: true
           files: |

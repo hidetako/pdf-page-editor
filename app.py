@@ -22,7 +22,7 @@ from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 
 def resource_path(rel: str) -> str:
@@ -142,7 +142,8 @@ class PageView(QLabel):
     def set_stamp_mode(self, on: bool, ghost: QPixmap | None = None):
         self.stamp_mode = on
         self.ghost = ghost if on else None
-        self.ghost_pos = None
+        if not on:
+            self.ghost_pos = None   # 押印モード継続中（再レイアウトでゴーストを差し替えるだけ）は位置を保つ
         self._update_cursor()
         self.update()
 
@@ -266,6 +267,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._update_actions()
         self._restore_layout()
+        # 起動時は印鑑パネルを閉じておく（押印モードに入ると自動で開く。メニュー「印鑑 > 印鑑パネルを表示」でも開ける）
+        self.stamp_dock.hide()
 
     # ------------------------------------------------------------ UI
     def _build_ui(self):
@@ -456,7 +459,7 @@ class MainWindow(QMainWindow):
 
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
-        self._resize_timer.timeout.connect(lambda: (self._layout_pages(), self._refresh_ghost()))
+        self._resize_timer.timeout.connect(lambda: (self._relayout_keep_page(), self._refresh_ghost()))
 
     # ------------------------------------------------------------ 状態
     def _update_actions(self):
@@ -1295,12 +1298,23 @@ class MainWindow(QMainWindow):
         else:
             self._resize_pages_widget()
 
-    def _relayout_keep_position(self):
+    def _relayout_keep_page(self):
+        """ページの大きさが変わっても（幅合わせの再計算・ズーム変更）、今見ているページと
+        そのページ内の相対位置を保ったまま並べ直す。"""
         vbar = self.scroll.verticalScrollBar()
-        ratio = vbar.value() / vbar.maximum() if vbar.maximum() > 0 else 0.0
+        idx = self.current if 0 <= self.current < len(self.views) else -1
+        frac = 0.0
+        if idx >= 0 and self.views[idx].height() > 0:
+            frac = (vbar.value() - (self._page_top(idx) - PAGE_GAP)) / self.views[idx].height()
         self._layout_pages()
-        vbar.setValue(int(ratio * vbar.maximum()))
+        if idx >= 0:
+            self._pin_current = idx   # このスクロールでは現在ページを変えない
+            vbar.setValue(max(0, int(self._page_top(idx) - PAGE_GAP + frac * self.views[idx].height())))
+            self._scroll_timer.start(30)
         self._render_visible()
+
+    def _relayout_keep_position(self):
+        self._relayout_keep_page()
         self._update_actions()
         self._refresh_ghost()
 
@@ -1322,9 +1336,16 @@ class MainWindow(QMainWindow):
             self.set_zoom(steps[0] if direction > 0 else steps[-1])
 
     def eventFilter(self, obj, event):
-        if obj is self.scroll.viewport() and event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
-            self.zoom_step(1 if event.angleDelta().y() > 0 else -1)
-            return True
+        if obj is self.scroll.viewport():
+            if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+                self.zoom_step(1 if event.angleDelta().y() > 0 else -1)
+                return True
+            if event.type() == QEvent.Resize and self.views:
+                # 分割バーのドラッグやドックの開閉で表示領域の幅が変わったら、幅合わせを計算し直す
+                if self.fit_width:
+                    self._resize_timer.start(80)
+                else:
+                    self._resize_pages_widget()
         return super().eventFilter(obj, event)
 
     def wheelEvent(self, event):

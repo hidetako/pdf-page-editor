@@ -112,6 +112,7 @@ def main():
     assert win.a_open.isEnabled()
     assert win.view is None and win.empty_label.isVisible() and "ドラッグ" in win.empty_label.text()
     assert win.stamp_dock_widget.list.count() == 5, "既定の印鑑 5 種"
+    assert not win.stamp_dock.isVisible(), "起動時は印鑑パネルは非表示"
     win.a_stamp.trigger()
     assert not win.stamp_mode and not win.a_stamp.isChecked(), "文書なしでは押印モードに入れない"
     shot(win, "empty")
@@ -158,9 +159,11 @@ def main():
     assert win.a_delete.isEnabled()
 
     step("連続スクロール: 全ページが縦に並び、スクロールで現在ページとサムネイル選択が追従、遠いページは未描画")
+    win.set_zoom(1.0); wait()   # ページの高さを表示幅やフォントに依存させない（A4 = 842px）
     win.goto(0); wait()
     vbar = win.scroll.verticalScrollBar()
-    assert vbar.maximum() > 0 and win.pages_widget.height() > win.scroll.viewport().height() * 3
+    assert vbar.maximum() > 0 and win.pages_widget.height() > win.scroll.viewport().height() * 3, (
+        win.pages_widget.height(), win.scroll.viewport().height(), [v.height() for v in win.views])
     assert win._page_top(1) == appmod.PAGE_GAP + win.views[0].height() + appmod.PAGE_GAP
     assert win.views[0].rendered_key is not None and win.views[4].rendered_key is None, "表示範囲外は遅延描画"
     vbar.setValue(vbar.maximum()); wait(100)
@@ -177,7 +180,7 @@ def main():
     vh = win.scroll.viewport().height()
     vbar.setValue(win._page_top(3) - vh + 10); wait(100)
     assert win.current == 2, (win.current, vbar.value(), win._page_top(3), vh)
-    win.goto(0); wait()
+    win.zoom_fit(); win.goto(0); wait()
 
     step("ズーム: 拡大/縮小/幅合わせ/100%/Ctrl+ホイール")
     win.goto(0); wait()
@@ -290,8 +293,9 @@ def main():
     dock = win.stamp_dock_widget
     dock.list.setCurrentRow(3)              # 「済」
     assert dock.current_stamp().name == "済"
-    QTest.keyClick(win, Qt.Key_F2); wait()
+    QTest.keyClick(win, Qt.Key_F2); wait(250)   # パネルが自動で開いて表示領域が変わり、幅合わせの再計算が落ち着くまで待つ
     assert win.stamp_mode and win.a_stamp.isChecked() and dock.btn_mode.isChecked()
+    assert win.stamp_dock.isVisible(), "押印モードに入ると印鑑パネルが開く"
     assert win.view.stamp_mode and win.view.ghost is not None
     assert "押印モード" in win.statusBar().currentMessage()
     g = win.view.pix_geometry(); ox, oy, pw, ph = g
@@ -302,7 +306,7 @@ def main():
     before_undo = len(win.model._undo)
     QTest.mouseClick(win.view, Qt.LeftButton, Qt.NoModifier, target); wait(100)
     assert len(win.model._undo) == before_undo + 1 and win.model.modified
-    assert "押印しました（ページ 5）" in win.statusBar().currentMessage()
+    assert "押印しました（ページ 5）" in win.statusBar().currentMessage(), (win.statusBar().currentMessage(), win.current)
     assert win.stamp_mode, "連続押印のためモードは継続"
     assert win.current == 4 and win.model.page_count == 7
     # ページ外（ページ間の余白）のクリックは押印しない
@@ -542,8 +546,11 @@ def main():
     assert w4.close()
     w5 = MainWindow(); w5.show(); wait(50)
     assert w5.toolBarArea(w5.toolbar) == Qt.LeftToolBarArea, "ツールバー位置が復元される"
-    assert not w5.stamp_dock.isVisible(), "印鑑パネルの表示状態も復元される"
+    assert not w5.stamp_dock.isVisible(), "印鑑パネルは起動時は常に非表示"
     w5.addToolBar(Qt.TopToolBarArea, w5.toolbar); w5.stamp_dock.show(); assert w5.close()
+    w5b = MainWindow(); w5b.show(); wait(50)
+    assert not w5b.stamp_dock.isVisible(), "前回表示したまま終了しても、起動時は非表示"
+    assert w5b.close()
 
     step("目次付き PDF: 開くと目次パネルが自動で開き、項目クリックでそのページへ移動")
     toc_pdf = os.path.join(_TMP, "toc.pdf")
