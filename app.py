@@ -22,7 +22,7 @@ from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 
 def resource_path(rel: str) -> str:
@@ -1322,9 +1322,16 @@ class MainWindow(QMainWindow):
             self.set_zoom(steps[0] if direction > 0 else steps[-1])
 
     def eventFilter(self, obj, event):
-        if obj is self.scroll.viewport() and event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
-            self.zoom_step(1 if event.angleDelta().y() > 0 else -1)
-            return True
+        if obj is self.scroll.viewport():
+            if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+                self.zoom_step(1 if event.angleDelta().y() > 0 else -1)
+                return True
+            if event.type() == QEvent.Resize and self.views:
+                # 分割バーのドラッグやドックの開閉で表示領域の幅が変わったら、幅合わせを計算し直す
+                if self.fit_width:
+                    self._resize_timer.start(80)
+                else:
+                    self._resize_pages_widget()
         return super().eventFilter(obj, event)
 
     def wheelEvent(self, event):

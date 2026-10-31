@@ -158,9 +158,11 @@ def main():
     assert win.a_delete.isEnabled()
 
     step("連続スクロール: 全ページが縦に並び、スクロールで現在ページとサムネイル選択が追従、遠いページは未描画")
+    win.set_zoom(1.0); wait()   # ページの高さを表示幅やフォントに依存させない（A4 = 842px）
     win.goto(0); wait()
     vbar = win.scroll.verticalScrollBar()
-    assert vbar.maximum() > 0 and win.pages_widget.height() > win.scroll.viewport().height() * 3
+    assert vbar.maximum() > 0 and win.pages_widget.height() > win.scroll.viewport().height() * 3, (
+        win.pages_widget.height(), win.scroll.viewport().height(), [v.height() for v in win.views])
     assert win._page_top(1) == appmod.PAGE_GAP + win.views[0].height() + appmod.PAGE_GAP
     assert win.views[0].rendered_key is not None and win.views[4].rendered_key is None, "表示範囲外は遅延描画"
     vbar.setValue(vbar.maximum()); wait(100)
@@ -177,7 +179,7 @@ def main():
     vh = win.scroll.viewport().height()
     vbar.setValue(win._page_top(3) - vh + 10); wait(100)
     assert win.current == 2, (win.current, vbar.value(), win._page_top(3), vh)
-    win.goto(0); wait()
+    win.zoom_fit(); win.goto(0); wait()
 
     step("ズーム: 拡大/縮小/幅合わせ/100%/Ctrl+ホイール")
     win.goto(0); wait()
