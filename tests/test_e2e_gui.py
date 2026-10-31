@@ -76,6 +76,14 @@ def wait(ms=50):
     QTest.qWait(ms)
 
 
+def mouse_move(widget, pos, button=Qt.NoButton):
+    """マウス移動イベントをウィジェットへ直接送る。
+    QTest.mouseMove はプラットフォーム経由（カーソル位置→下のウィジェット）で、Windows のオフスクリーンでは届かないことがある。"""
+    from PySide6.QtGui import QMouseEvent
+    ev = QMouseEvent(QEvent.MouseMove, QPointF(pos), QPointF(widget.mapToGlobal(pos)), Qt.NoButton, button, Qt.NoModifier)
+    QApplication.sendEvent(widget, ev)
+
+
 def thumb_center(win, row):
     r = win.thumbs.visualItemRect(win.thumbs.item(row))
     return r.center()
@@ -303,7 +311,7 @@ def main():
     assert "押印モード" in win.statusBar().currentMessage()
     g = win.view.pix_geometry(); ox, oy, pw, ph = g
     target = QPoint(int(ox + pw * 0.75), int(oy + ph * 0.25))
-    QTest.mouseMove(win.view, target); wait()
+    mouse_move(win.view, target); wait()
     assert win.view.ghost_pos is not None, "マウス追従ゴースト"
     shot(win, "stamp_ghost")
     before_undo = len(win.model._undo)
@@ -605,9 +613,9 @@ def main():
     # ホバー: 付箋の上でツールチップ、余白では出ない
     from PySide6.QtWidgets import QToolTip
     on_note = QPoint(int(ox + (r.x0 + 6) * pw / pr.width), int(oy + (r.y0 + 6) * ph / pr.height))
-    QTest.mouseMove(w6.view, on_note); wait(100)
+    mouse_move(w6.view, on_note); wait(100)
     assert "要確認です" in QToolTip.text(), QToolTip.text()
-    QTest.mouseMove(w6.view, QPoint(int(ox + pw * 0.1), int(oy + ph * 0.9))); wait(700)   # hideText はフェード後に消える
+    mouse_move(w6.view, QPoint(int(ox + pw * 0.1), int(oy + ph * 0.9))); wait(700)   # hideText はフェード後に消える
     assert not QToolTip.isVisible() and QToolTip.text() == "", QToolTip.text()
     # 右クリック → 編集 / 削除（メニューを差し替えて項目を選ぶ）
     from PySide6.QtGui import QContextMenuEvent as _CME
@@ -692,8 +700,8 @@ def main():
     # "World" から "second" までドラッグ（2 行またぎ、日本語行を含む）
     start = to_widget(words[1]["rect"]); end = to_widget(words[-3]["rect"])
     QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, start); wait()
-    QTest.mouseMove(v, QPoint(start.x() + 40, start.y() + 30)); wait()
-    QTest.mouseMove(v, end); wait()
+    mouse_move(v, QPoint(start.x() + 40, start.y() + 30), Qt.LeftButton); wait()
+    mouse_move(v, end, Qt.LeftButton); wait()
     QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, end); wait(100)
     assert w8.sel_range is not None and len(v.selection_rects) >= 5, (w8.sel_range, len(v.selection_rects))
     assert w8.selected_text == "World from PDF\n稟議書 承認済み\nsecond", repr(w8.selected_text)
@@ -713,19 +721,19 @@ def main():
     blank = QPoint(int(ox + pw * 0.5), int(oy + ph * 0.8))
     QTest.mouseClick(v, Qt.LeftButton, Qt.NoModifier, blank); wait(100)
     assert w8.selected_text == "" and not v.selection_rects and not w8.a_copy.isEnabled()
-    QTest.mouseMove(v, to_widget(words[0]["rect"])); wait(100)
+    mouse_move(v, to_widget(words[0]["rect"])); wait(100)
     assert v.cursor().shape() == Qt.IBeamCursor
-    QTest.mouseMove(v, blank); wait(100)
+    mouse_move(v, blank); wait(100)
     assert v.cursor().shape() == Qt.ArrowCursor
     # 1 単語だけの選択 → Esc で解除。押印モード中はドラッグしても選択されない
     QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, to_widget(words[0]["rect"], 0.2)); wait()
-    QTest.mouseMove(v, to_widget(words[0]["rect"], 0.9)); wait()
+    mouse_move(v, to_widget(words[0]["rect"], 0.9), Qt.LeftButton); wait()
     QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, to_widget(words[0]["rect"], 0.9)); wait(100)
     assert w8.selected_text == "Hello", repr(w8.selected_text)
     QTest.keyClick(w8, Qt.Key_Escape); wait()
     assert w8.selected_text == "" and not v.selection_rects
     w8.stamp_dock_widget.list.setCurrentRow(0); w8.a_stamp.trigger(); wait()
-    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, start); QTest.mouseMove(v, end); QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, end); wait(150)
+    QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, start); mouse_move(v, end, Qt.LeftButton); QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, end); wait(150)
     assert w8.selected_text == "" and len(w8.model.stamps_on_page(0)) == 1, "押印モードのドラッグは押印になる"
     QTest.keyClick(w8, Qt.Key_Escape); wait()
     w8.model.modified = False; assert w8.close()
