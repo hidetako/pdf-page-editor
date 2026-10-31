@@ -187,11 +187,14 @@ def main():
     fit_w = win.view.pixmap().width()
     QTest.keyClick(win, Qt.Key_Equal, Qt.ControlModifier); wait()
     assert not win.fit_width and "ズーム" in win.page_label.text() and "幅合わせ" not in win.page_label.text()
-    z1 = win.zoom
-    QTest.keyClick(win, Qt.Key_Minus, Qt.ControlModifier); wait()
-    assert win.zoom < z1
+    assert win.zoom in appmod.ZOOM_STEPS, "幅合わせから拡大すると段階のどれかになる"
+    # 幅合わせの倍率は表示幅次第（狭い環境では最小段階を下回る）ので、段階の比較は 100% を起点に行う
     QTest.keyClick(win, Qt.Key_1, Qt.ControlModifier); wait()
     assert win.zoom == 1.0 and "100%" in win.page_label.text()
+    QTest.keyClick(win, Qt.Key_Equal, Qt.ControlModifier); wait()
+    assert win.zoom == 1.25, win.zoom
+    QTest.keyClick(win, Qt.Key_Minus, Qt.ControlModifier); wait()
+    assert win.zoom == 1.0, win.zoom
     assert abs(win.view.pixmap().width() / win.view.pixmap().devicePixelRatio() - 595) <= 1
     ev = QWheelEvent(QPointF(10, 10), QPointF(10, 10), QPoint(0, 0), QPoint(0, 120), Qt.NoButton,
                      Qt.ControlModifier, Qt.NoScrollPhase, False)
