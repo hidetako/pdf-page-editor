@@ -15,7 +15,38 @@ permissions:
   contents: write
 
 jobs:
+  # GUI E2E は Linux のオフスクリーンで検証する（開発環境と同じ条件で安定）。これが通らなければリリースしない。
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install Qt runtime libraries and CJK fonts
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1 libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 libdbus-1-3 libglib2.0-0 fonts-noto-cjk
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests (unit + GUI E2E, offscreen)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python tests/test_model.py
+          python tests/test_stamps.py
+          python tests/test_notes_toc.py
+          python tests/test_e2e_gui.py
+
   build:
+    needs: test-linux
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
@@ -32,7 +63,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run tests (unit + GUI E2E, offscreen)
+      - name: Run unit tests
         env:
           QT_QPA_PLATFORM: offscreen
           PYTHONUTF8: "1"            # Windows ランナーの標準出力は cp1252 なので、日本語の出力で落ちないように UTF-8 にする
@@ -41,7 +72,14 @@ jobs:
           python tests/test_model.py
           python tests/test_stamps.py
           python tests/test_notes_toc.py
-          python tests/test_e2e_gui.py
+
+      - name: Run GUI E2E on Windows (参考。Windows のオフスクリーンはフォント無し・寸法差があり、必須にしない)
+        continue-on-error: true
+        env:
+          QT_QPA_PLATFORM: offscreen
+          PYTHONUTF8: "1"
+          PYTHONIOENCODING: utf-8
+        run: python tests/test_e2e_gui.py
 
       - name: Determine version and whether to publish
         id: ver
