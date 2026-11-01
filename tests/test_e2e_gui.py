@@ -114,7 +114,7 @@ def main():
     step("起動: 文書なしでは編集系アクションが無効")
     assert win.windowTitle() == appmod.APP_NAME
     assert win.thumbs.count() == 0
-    for act in (win.a_save, win.a_saveas, win.a_insert, win.a_delete, win.a_rotl, win.a_rotr,
+    for act in (win.a_save, win.a_saveas, win.a_insert, win.a_print, win.a_delete, win.a_rotl, win.a_rotr,
                 win.a_up, win.a_down, win.a_extract, win.a_undo, win.a_redo):
         assert not act.isEnabled(), act.text()
     assert win.a_open.isEnabled()
@@ -474,6 +474,52 @@ def main():
     assert t == ["A-5", "A-1"] and r == [90, 0], (t, r)
     assert win.model.page_count == 7 and "2 ページを抽出" in win.statusBar().currentMessage()
     assert red_center(ex + ".pdf", 1)[2] > 10, "抽出ページに押印が残る"
+
+    step("印刷: Ctrl+P → ダイアログ（差し替え）→ 範囲指定 / 現在のページ / 選択ページを PDF プリンターへ、キャンセル")
+    from PySide6.QtPrintSupport import QPrintDialog, QPrinter
+    assert win.a_print.isEnabled()
+    def accept_with(path, setup):
+        def _accept(dlg):
+            p = dlg.printer()
+            p.setOutputFormat(QPrinter.PdfFormat); p.setOutputFileName(path)
+            setup(p)
+            return QPrintDialog.Accepted
+        return _accept
+    def printed(path):
+        pd = fitz.open(path)
+        n = pd.page_count
+        px = pd[0].get_pixmap(dpi=36)
+        dark = int(np.frombuffer(px.samples, dtype=np.uint8).min())
+        pd.close()
+        return n, dark
+    # 範囲指定 1〜2 ページ（1 ページ目は 90° 回転した横長ページ → 用紙に合わせて回転して印刷）
+    p1 = os.path.join(_TMP, "print_range.pdf")
+    win._exec_print_dialog = accept_with(p1, lambda p: (p.setPrintRange(QPrinter.PageRange), p.setFromTo(1, 2)))
+    QTest.keyClick(win, Qt.Key_P, Qt.ControlModifier); wait(300)
+    assert os.path.exists(p1) and "2 ページを印刷しました" in win.statusBar().currentMessage(), win.statusBar().currentMessage()
+    n, dark = printed(p1); assert n == 2 and dark < 200, (n, dark)
+    pd = fitz.open(p1); r0 = pd[0].rect; pd.close()
+    assert r0.width < r0.height, "出力用紙は縦（横長ページは回転して収める）"
+    # 現在のページ
+    p2 = os.path.join(_TMP, "print_current.pdf")
+    win._exec_print_dialog = accept_with(p2, lambda p: p.setPrintRange(QPrinter.CurrentPage))
+    win.a_print.trigger(); wait(300)
+    assert printed(p2)[0] == 1
+    # 選択ページ（2 ページ選択中）
+    assert len(win.thumbs.selected_indices()) == 2
+    p3 = os.path.join(_TMP, "print_sel.pdf")
+    win._exec_print_dialog = accept_with(p3, lambda p: p.setPrintRange(QPrinter.Selection))
+    win.a_print.trigger(); wait(300)
+    assert printed(p3)[0] == 2
+    # すべて
+    p4 = os.path.join(_TMP, "print_all.pdf")
+    win._exec_print_dialog = accept_with(p4, lambda p: p.setPrintRange(QPrinter.AllPages))
+    win.a_print.trigger(); wait(400)
+    assert printed(p4)[0] == win.model.page_count
+    # キャンセルは何もしない
+    win._exec_print_dialog = lambda dlg: QPrintDialog.Rejected
+    win.statusBar().clearMessage(); win.a_print.trigger(); wait()
+    assert "印刷しました" not in win.statusBar().currentMessage()
 
     step("名前を付けて保存: Ctrl+Shift+S、タイトル更新、押印位置・順序・回転が保存される")
     out = os.path.join(_TMP, "out.pdf")
