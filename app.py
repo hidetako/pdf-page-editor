@@ -9,9 +9,10 @@ import sys
 
 import numpy as np
 import pymupdf as fitz
-from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDragEnterEvent, QDropEvent, QIcon, QImage,
                            QKeySequence, QPainter, QPixmap)
+from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
                                QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QScrollArea, QSplitter, QStatusBar, QToolBar, QToolTip,
@@ -22,7 +23,7 @@ from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.1.1"
+__version__ = "1.2.0"
 
 
 def resource_path(rel: str) -> str:
@@ -31,6 +32,7 @@ def resource_path(rel: str) -> str:
     return os.path.join(base, rel)
 THUMB_W = 140
 PAGE_GAP = 12           # 連続表示でのページ間の余白 (px)
+PRINT_MAX_DPI = 300     # 印刷時の描画解像度の上限（これ以上はプリンター側で拡大。メモリと速度のため）
 ZOOM_STEPS = [0.5, 0.67, 0.8, 1.0, 1.25, 1.5, 2.0, 3.0]
 PDF_FILTER = "PDF ファイル (*.pdf)"
 # 表示モード: 名前 → (メニュー表示, ページ背景色, 説明)
@@ -394,6 +396,8 @@ class MainWindow(QMainWindow):
         self.a_save = act("保存", self.save, "Ctrl+S", fmenu, icon="document-save", tip="編集内容を元のファイルに上書き保存")
         self.a_saveas = act("名前を付けて保存", self.save_as, "Ctrl+Shift+S", fmenu, icon="document-save-as", tip="別名の PDF として保存（元ファイルは変更しない）")
         fmenu.addSeparator()
+        self.a_print = act("印刷...", self.print_dialog, "Ctrl+P", fmenu, icon="document-print", tip="プリンターで印刷。すべて / 現在のページ / 選択ページ / 範囲指定、部数、用紙に合わせて拡大縮小")
+        fmenu.addSeparator()
         self.a_extract = act("選択ページを抽出...", self.extract_selected, None, fmenu, toolbar=False, tip="選択中のページだけを新しい PDF として書き出す")
         fmenu.addSeparator()
         act("終了", self.close, "Ctrl+Q", fmenu, toolbar=False)
@@ -465,7 +469,7 @@ class MainWindow(QMainWindow):
     def _update_actions(self):
         has = self.model.doc is not None and self.model.page_count > 0
         sel = bool(self.thumbs.selectedItems())
-        for a in (self.a_save, self.a_saveas, self.a_insert, self.a_note, self.a_bookmark, self.btn_bm_add):
+        for a in (self.a_save, self.a_saveas, self.a_insert, self.a_print, self.a_note, self.a_bookmark, self.btn_bm_add):
             a.setEnabled(has)
         has_toc_sel = has and self.toc_tree.currentItem() is not None
         self.btn_bm_rename.setEnabled(has_toc_sel)
@@ -618,6 +622,91 @@ class MainWindow(QMainWindow):
             self._error(e)
             return
         self.statusBar().showMessage(f"{len(sel)} ページを抽出: {path}", 4000)
+
+    # ------------------------------------------------------------ 印刷
+    def print_dialog(self):
+        if self.model.doc is None or self.model.page_count == 0:
+            return
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setDocName(os.path.basename(self.model.path) if self.model.path else "無題")
+        printer.setFromTo(1, self.model.page_count)
+        dlg = QPrintDialog(printer, self)
+        dlg.setWindowTitle("印刷")
+        opts = QPrintDialog.PrintToFile | QPrintDialog.PrintPageRange | QPrintDialog.PrintCurrentPage | QPrintDialog.PrintCollateCopies
+        if len(self.thumbs.selected_indices()) > 0:
+            opts |= QPrintDialog.PrintSelection
+        dlg.setOptions(opts)
+        dlg.setMinMax(1, self.model.page_count)
+        if self._exec_print_dialog(dlg) != QPrintDialog.Accepted:
+            return
+        pages = self._print_page_list(printer)
+        if not pages:
+            self.statusBar().showMessage("印刷するページがありません。", 4000)
+            return
+        try:
+            self.print_pages(printer, pages)
+        except Exception as e:
+            self._error(e)
+            return
+        dest = printer.outputFileName() or printer.printerName() or "プリンター"
+        self.statusBar().showMessage(f"{len(pages)} ページを印刷しました: {dest}", 5000)
+
+    def _exec_print_dialog(self, dlg: QPrintDialog) -> int:
+        """印刷ダイアログを表示して結果を返す（テストではここを差し替える）。"""
+        return dlg.exec()
+
+    def _print_page_list(self, printer: QPrinter) -> list[int]:
+        """ダイアログの選択（すべて / 現在のページ / 選択 / 範囲）から印刷するページ番号 (0 始まり) を決める。"""
+        n = self.model.page_count
+        rng = printer.printRange()
+        if rng == QPrinter.CurrentPage:
+            return [self.current] if 0 <= self.current < n else []
+        if rng == QPrinter.Selection:
+            return [i for i in self.thumbs.selected_indices() if 0 <= i < n]
+        if rng == QPrinter.PageRange:
+            lo, hi = printer.fromPage(), printer.toPage()
+            if lo <= 0 and hi <= 0:
+                return list(range(n))
+            lo = max(1, lo)
+            hi = n if hi <= 0 else min(hi, n)
+            return list(range(lo - 1, hi))
+        return list(range(n))
+
+    def print_pages(self, printer: QPrinter, pages: list[int]):
+        """各ページを印刷解像度で描画し、用紙の印刷可能領域に収めて（縦横比維持・中央）出力する。
+        横長のページは用紙に合わせて自動で回転する。表示モード（暖色・反転）は印刷には適用しない。"""
+        doc = self.model.doc
+        painter = QPainter()
+        if not painter.begin(printer):
+            raise RuntimeError("プリンターを開けませんでした。")
+        try:
+            dpi = max(72, min(printer.resolution(), PRINT_MAX_DPI))
+            for k, idx in enumerate(pages):
+                if k > 0:
+                    printer.newPage()
+                rect = doc[idx].rect
+                landscape = rect.width > rect.height
+                area = printer.pageRect(QPrinter.DevicePixel)
+                area_landscape = area.width() > area.height()
+                img = pix_to_qimage(self.model.render(idx, scale=dpi / 72))
+                painter.save()
+                painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+                if landscape != area_landscape:
+                    # 用紙の向きと合わなければ 90° 回して収める。/Rotate 90 のページ（スキャンの横長原稿に多い）が
+                    # 元の向きで出るよう反時計回りにする
+                    painter.translate(area.center())
+                    painter.rotate(-90)
+                    painter.translate(-area.center())
+                    aw, ah = area.height(), area.width()
+                else:
+                    aw, ah = area.width(), area.height()
+                s = min(aw / img.width(), ah / img.height())
+                w, h = img.width() * s, img.height() * s
+                cx, cy = area.center().x(), area.center().y()
+                painter.drawImage(QRectF(cx - w / 2, cy - h / 2, w, h), img)
+                painter.restore()
+        finally:
+            painter.end()
 
     # ------------------------------------------------------------ 編集
     def insert_dialog(self):
