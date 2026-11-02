@@ -9,7 +9,7 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import updater
-from updater import DOWNLOAD_PREFIX, UpdateInfo, check_for_update, download_installer, installer_args, is_newer, parse_version
+from updater import DOWNLOAD_PREFIX, UpdateInfo, check_for_update, download_installer, install_scope_arg, installer_args, is_newer, parse_version
 
 
 def release(tag="v1.3.0", assets=None, **extra):
@@ -69,7 +69,19 @@ def main():
         raise AssertionError("想定外の配布元からダウンロードした")
     except ValueError:
         pass
-    assert installer_args(r"C:\x\Setup.exe") == [r"C:\x\Setup.exe", "/SILENT", "/NORESTART", "/LAUNCH=1"]
+    env = {"ProgramFiles": r"C:\Program Files", "ProgramFiles(x86)": r"C:\Program Files (x86)", "LOCALAPPDATA": r"C:\Users\u\AppData\Local"}
+    # 現在のユーザー用（%LOCALAPPDATA%\Programs）で動いていれば /CURRENTUSER
+    assert install_scope_arg(r"C:\Users\u\AppData\Local\Programs\PdfPageEditor\PdfPageEditor.exe", env) == "/CURRENTUSER"
+    # Program Files 配下なら /ALLUSERS（大文字小文字・区切り文字の違いは無視）
+    assert install_scope_arg(r"c:\program files\PdfPageEditor\PdfPageEditor.exe", env) == "/ALLUSERS"
+    assert install_scope_arg("C:/Program Files (x86)/PdfPageEditor/PdfPageEditor.exe", env) == "/ALLUSERS"
+    # 似た名前の別フォルダや、exe 不明のときは現在のユーザー用に倒す
+    assert install_scope_arg(r"C:\Program Files2\PdfPageEditor\PdfPageEditor.exe", env) == "/CURRENTUSER"
+    assert install_scope_arg(None, env) == "/CURRENTUSER"
+    assert install_scope_arg(r"C:\dev\pdf-page-editor\dist\PdfPageEditor.exe", {}) == "/CURRENTUSER"
+    assert installer_args(r"C:\x\Setup.exe", r"C:\Users\u\AppData\Local\Programs\PdfPageEditor\PdfPageEditor.exe", env) == \
+        [r"C:\x\Setup.exe", "/SILENT", "/NORESTART", "/LAUNCH=1", "/CURRENTUSER"]
+    assert installer_args(r"C:\x\Setup.exe", r"C:\Program Files\PdfPageEditor\PdfPageEditor.exe", env)[-1] == "/ALLUSERS"
     print("updater tests passed")
 
 

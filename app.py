@@ -26,7 +26,7 @@ from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.3.0"
+__version__ = "1.3.1"
 
 
 def resource_path(rel: str) -> str:
@@ -698,7 +698,8 @@ class MainWindow(QMainWindow):
         return th.path
 
     def _launch_installer(self, path: str):
-        subprocess.Popen(updater.installer_args(path), close_fds=True)
+        # 今動いている exe の場所（ユーザー用 / 全ユーザー用）に合わせて上書きさせる
+        subprocess.Popen(updater.installer_args(path, sys.executable), close_fds=True)
 
     def show_about(self):
         QMessageBox.about(self, f"{APP_NAME} について",
