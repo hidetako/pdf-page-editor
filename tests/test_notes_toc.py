@@ -64,6 +64,93 @@ def main():
     m.close()
     print("  model: notes / toc OK")
 
+    # ---- モデル: 注釈（マーカー・テキスト注釈・既存注釈の編集）。回転ページでも表示座標で扱える
+    from pdfmodel import PasswordRequired
+    pdf_txt = os.path.join(_TMP, "txt.pdf")
+    d = fitz.open(); pg = d.new_page(width=595, height=842)
+    pg.insert_text((72, 100), "Hello World from PDF", fontsize=24)
+    pg.insert_text((72, 160), "稟議書 承認済み", fontsize=24, fontname="japan")
+    d.save(pdf_txt); d.close()
+    m = PdfModel(); m.open(pdf_txt)
+    m.doc[0].set_rotation(90)
+    words = m.page_words(0)
+    hl = m.add_markup(0, "highlight", [w["rect"] for w in words[:2]])
+    ul = m.add_markup(0, "underline", [words[4]["rect"]], color=(0, 0, 1))
+    so = m.add_markup(0, "strikeout", [words[5]["rect"]])
+    ann = m.annots_on_page(0)
+    assert [a["kind"] for a in ann] == ["蛍光ペン", "下線", "取り消し線"] and ann[1]["stroke"] == (0.0, 0.0, 1.0), ann
+    assert ann[0]["rect"].contains(fitz.Rect(words[0]["rect"])) and ann[0]["rect"].contains(fitz.Rect(words[1]["rect"]))
+    assert not ann[0]["movable"] and m.annot_at(0, (words[1]["rect"].x0 + 1, words[1]["rect"].y0 + 1))["xref"] == hl
+    try:
+        m.move_annot(0, hl, 10, 10); raise AssertionError("マーカーは移動できない")
+    except ValueError:
+        pass
+    ft = m.add_free_text(0, (300, 100), "日本語の\nメモ", fontsize=14)
+    a = m.annot_at(0, (305, 105))
+    assert a["xref"] == ft and a["kind"] == "テキスト注釈" and a["fontsize"] == 14.0 and a["movable"] and a["text"] == "日本語の\nメモ", a
+    assert a["rect"].x0 == 300 and a["rect"].y0 == 100 and a["rect"].height > 14 * 2, a["rect"]
+    m.move_annot(0, ft, 50, 20)
+    assert m.annot_at(0, (355, 125))["xref"] == ft and m.annot_at(0, (305, 105)) is None
+    m.set_annot_text(0, ft, "変更後"); m.set_annot_color(0, ft, (0, 0, 1)); m.set_annot_fontsize(0, ft, 20)
+    a = [z for z in m.annots_on_page(0) if z["xref"] == ft][0]
+    assert a["text"] == "変更後" and a["stroke"] == (0.0, 0.0, 1.0) and a["fontsize"] == 20.0 and a["rect"].x0 == 350 and a["rect"].y0 == 120, a
+    m.set_annot_color(0, hl, (0, 1, 0)); assert m.annots_on_page(0)[0]["stroke"] == (0.0, 1.0, 0.0)
+    pix = m.render(0, 1.0); r = a["rect"]
+    blues = sum(1 for yy in range(int(r.y0), int(r.y1)) for xx in range(int(r.x0), int(r.x1)) if pix.pixel(xx, yy)[2] > 150 and pix.pixel(xx, yy)[0] < 100)
+    assert blues > 20, "テキスト注釈が描画される"
+    m.remove_annot(0, so); assert [z["kind"] for z in m.annots_on_page(0)] == ["蛍光ペン", "下線", "テキスト注釈"]
+    m.undo(); assert len(m.annots_on_page(0)) == 4
+    m.undo(); m.undo(); assert m.annots_on_page(0)[-1]["fontsize"] == 14.0, "文字サイズ変更を Undo"
+    out = os.path.join(_TMP, "annots.pdf"); m.save(out); m.close()
+    d = fitz.open(out); assert [x.type[1] for x in d[0].annots()] == ["Highlight", "Underline", "StrikeOut", "FreeText"]; d.close()
+    # 他のソフトが作った注釈として開き直しても編集できる
+    m = PdfModel(); m.open(out)
+    a = m.annots_on_page(0)
+    assert a[3]["text"] == "変更後" and a[3]["stroke"] == (0.0, 0.0, 1.0) and a[0]["stroke"] == (1.0, 1.0, 0.0), a
+    m.set_annot_text(0, a[3]["xref"], "再編集"); m.move_annot(0, a[3]["xref"], -10, -10)
+    assert m.annots_on_page(0)[3]["text"] == "再編集"
+    # 回転を戻しても注釈の表示位置は追従する（ページ座標は不変）
+    r_before = m.annots_on_page(0)[3]["rect"]
+    m.rotate([0], -90)
+    r_after = m.annots_on_page(0)[3]["rect"]
+    assert r_before != r_after and abs(r_after.width - r_before.height) < 0.01, (r_before, r_after)
+    m.close()
+    print("  model: annots OK")
+
+    # ---- モデル: パスワード付き PDF（開く・保存・解除・制限）
+    enc = os.path.join(_TMP, "enc.pdf")
+    d = fitz.open(); d.new_page(); d.new_page(); d.save(enc, encryption=fitz.PDF_ENCRYPT_AES_256, user_pw="pw", owner_pw="own"); d.close()
+    m = PdfModel()
+    for pw, wrong in ((None, False), ("bad", True)):
+        try:
+            m.open(enc, pw); raise AssertionError("開けてはいけない")
+        except PasswordRequired as e:
+            assert e.wrong is wrong and e.path == enc
+    assert m.doc is None
+    m.open(enc, "pw"); assert m.page_count == 2 and m.password == "pw" and m.restrictions() == []
+    m.rotate([1], 90); m.undo(); m.rotate([1], 90)
+    assert m.doc[1].rotation == 90 and m.password == "pw", "Undo 後もパスワードは保持"
+    out = os.path.join(_TMP, "enc_out.pdf"); m.save(out)
+    d = fitz.open(out); assert d.needs_pass and d.authenticate("pw") and d[1].rotation == 90; d.close()
+    m.set_password(None); assert m.modified; m.save()
+    d = fitz.open(out); assert not d.needs_pass; d.close()
+    m.set_password("new"); m.save()
+    m2 = PdfModel(); m2.open(out, "new"); assert m2.page_count == 2; m2.close()
+    # 閲覧パスワード無しの制限付き PDF は開けるが、制限が分かる
+    lim = os.path.join(_TMP, "limited.pdf")
+    d = fitz.open(); d.new_page(); d.save(lim, encryption=fitz.PDF_ENCRYPT_AES_128, owner_pw="own", permissions=fitz.PDF_PERM_ACCESSIBILITY | fitz.PDF_PERM_COPY); d.close()
+    m3 = PdfModel(); m3.open(lim)
+    assert m3.password is None and m3.restrictions() == ["印刷", "編集", "注釈"], m3.restrictions()
+    # パスワード付き PDF の挿入
+    m4 = PdfModel(); m4.open(pdf_plain)
+    try:
+        m4.insert_file(out); raise AssertionError("パスワード無しで挿入できてはいけない")
+    except PasswordRequired as e:
+        assert not e.wrong
+    assert m4.insert_file(out, password="new") == 2 and m4.page_count == 4
+    m.close(); m3.close(); m4.close()
+    print("  model: password OK")
+
     # ---- 表示モードの色変換
     pix = fitz.open(pdf_plain)[0].get_pixmap(dpi=36)
     img_w = apply_display_mode(pix, "warm"); img_i = apply_display_mode(pix, "invert"); img_n = apply_display_mode(pix, "normal")

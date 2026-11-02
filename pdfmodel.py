@@ -13,8 +13,46 @@ from typing import Iterable, Sequence
 import pymupdf as fitz  # PyMuPDF
 
 _CM_RE = re.compile(r"([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) cm")
+_DA_COLOR_RE = re.compile(r"([-\d.]+) ([-\d.]+) ([-\d.]+) rg")
+_DA_FONT_RE = re.compile(r"/\S+ ([-\d.]+) Tf")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 MAX_UNDO = 20
+
+# 注釈の種類 → 表示名
+ANNOT_KINDS = {
+    fitz.PDF_ANNOT_TEXT: "付箋",
+    fitz.PDF_ANNOT_FREE_TEXT: "テキスト注釈",
+    fitz.PDF_ANNOT_HIGHLIGHT: "蛍光ペン",
+    fitz.PDF_ANNOT_UNDERLINE: "下線",
+    fitz.PDF_ANNOT_STRIKE_OUT: "取り消し線",
+    fitz.PDF_ANNOT_SQUIGGLY: "波線",
+    fitz.PDF_ANNOT_SQUARE: "四角",
+    fitz.PDF_ANNOT_CIRCLE: "円",
+    fitz.PDF_ANNOT_LINE: "線",
+    fitz.PDF_ANNOT_POLYGON: "多角形",
+    fitz.PDF_ANNOT_POLY_LINE: "折れ線",
+    fitz.PDF_ANNOT_INK: "手書き",
+    fitz.PDF_ANNOT_STAMP: "スタンプ",
+    fitz.PDF_ANNOT_FILE_ATTACHMENT: "添付ファイル",
+    fitz.PDF_ANNOT_CARET: "挿入記号",
+    fitz.PDF_ANNOT_REDACT: "墨消し",
+}
+# 文字の範囲に付く注釈（位置は文字で決まるので移動できない）
+MARKUP_TYPES = {fitz.PDF_ANNOT_HIGHLIGHT, fitz.PDF_ANNOT_UNDERLINE, fitz.PDF_ANNOT_STRIKE_OUT, fitz.PDF_ANNOT_SQUIGGLY}
+MARKUP_KINDS = {"highlight": fitz.PDF_ANNOT_HIGHLIGHT, "underline": fitz.PDF_ANNOT_UNDERLINE, "strikeout": fitz.PDF_ANNOT_STRIKE_OUT}
+_SKIP_TYPES = {fitz.PDF_ANNOT_POPUP, fitz.PDF_ANNOT_LINK, fitz.PDF_ANNOT_WIDGET}
+# 制限（permissions ビットが立っていない = 禁止）
+_PERMISSION_LABELS = [(fitz.PDF_PERM_PRINT, "印刷"), (fitz.PDF_PERM_MODIFY, "編集"),
+                      (fitz.PDF_PERM_COPY, "コピー"), (fitz.PDF_PERM_ANNOTATE, "注釈")]
+
+
+class PasswordRequired(PermissionError):
+    """パスワード付き PDF。password を付けて開き直す。wrong=True なら渡したパスワードが違った。"""
+
+    def __init__(self, path: str, wrong: bool = False):
+        self.path = path
+        self.wrong = wrong
+        super().__init__("パスワードが違います。" if wrong else "この PDF はパスワードで保護されています。")
 
 
 class PdfModel:
@@ -25,6 +63,8 @@ class PdfModel:
         self._undo: list[bytes] = []
         self._redo: list[bytes] = []
         self._stamp_streams: set[int] = set()   # このセッションで押印した内容ストリームの xref（押印 1 つ = 1 ストリーム）
+        self.password: str | None = None        # 開くのに使ったパスワード（保存時に同じパスワードで暗号化し直す）
+        self.permissions: int = -1              # PDF の許可ビット（-1 = すべて許可）
 
     # ------------------------------------------------------------ 基本
     @property
@@ -36,17 +76,37 @@ class PdfModel:
         self.doc = fitz.open()
         self.modified = False
 
-    def open(self, path: str) -> None:
-        """ファイルを丸ごとメモリに読み込んで開く（元ファイルへの上書き保存を可能にする）。"""
+    def open(self, path: str, password: str | None = None) -> None:
+        """ファイルを丸ごとメモリに読み込んで開く（元ファイルへの上書き保存を可能にする）。
+
+        パスワード付き PDF は PasswordRequired を投げるので、password を付けて開き直す。
+        """
         with open(path, "rb") as f:
             data = f.read()
-        doc = fitz.open(stream=data, filetype="pdf")
-        if doc.needs_pass:
-            raise PermissionError("パスワード付き PDF は現在未対応です。")
+        doc = _open_bytes(data, path, password)
         self.close()
         self.doc = doc
         self.path = path
+        self.password = password if password else None
+        self.permissions = doc.permissions
         self.modified = False
+
+    def restrictions(self) -> list[str]:
+        """この PDF に設定されている制限（印刷・編集・コピー・注釈）の表示名。無ければ空。"""
+        if self.doc is None or self.permissions == -1:
+            return []
+        return [label for bit, label in _PERMISSION_LABELS if not (self.permissions & bit)]
+
+    def set_password(self, password: str | None) -> None:
+        """保存時のパスワードを設定（None / 空で解除）。"""
+        self._require()
+        password = password or None
+        if password == self.password:
+            return
+        self.password = password
+        if password is None:
+            self.permissions = -1
+        self.modified = True
 
     def close(self) -> None:
         if self.doc is not None:
@@ -57,6 +117,8 @@ class PdfModel:
         self._undo.clear()
         self._redo.clear()
         self._stamp_streams.clear()
+        self.password = None
+        self.permissions = -1
 
     def _require(self) -> fitz.Document:
         if self.doc is None:
@@ -149,8 +211,9 @@ class PdfModel:
         doc.delete_pages(idx)
         self.modified = True
 
-    def insert_file(self, src_path: str, at: int | None = None) -> int:
-        """PDF または画像を at の位置（None なら末尾）に挿入。挿入ページ数を返す。"""
+    def insert_file(self, src_path: str, at: int | None = None, password: str | None = None) -> int:
+        """PDF または画像を at の位置（None なら末尾）に挿入。挿入ページ数を返す。
+        パスワード付き PDF は PasswordRequired を投げるので、password を付けて呼び直す。"""
         doc = self._require()
         ext = os.path.splitext(src_path)[1].lower()
         if ext in IMAGE_EXTS:
@@ -158,10 +221,8 @@ class PdfModel:
             src = fitz.open("pdf", img.convert_to_pdf())
             img.close()
         else:
-            src = fitz.open(src_path)
-            if src.needs_pass:
-                src.close()
-                raise PermissionError("パスワード付き PDF は挿入できません。")
+            with open(src_path, "rb") as f:
+                src = _open_bytes(f.read(), src_path, password)
         count = src.page_count
         self._push_undo()
         if at is None or at >= doc.page_count:
@@ -293,6 +354,174 @@ class PdfModel:
                 return
         raise ValueError("付箋が見つかりません。")
 
+    # ------------------------------------------------------------ 注釈（全種類）
+    def annots_on_page(self, index: int) -> list[dict]:
+        """ページ上の注釈一覧（ポップアップ・リンク・フォーム部品を除く）。rect は表示座標。
+
+        type: PyMuPDF の種類番号, kind: 表示名, text: 内容, movable: ドラッグで動かせるか,
+        stroke: 線・文字の色 (r, g, b) または None, fontsize: テキスト注釈の文字サイズ
+        """
+        doc = self._require()
+        page = doc[index]
+        out = []
+        for annot in page.annots():
+            t = annot.type[0]
+            if t in _SKIP_TYPES:
+                continue
+            info = annot.info
+            d = {
+                "xref": annot.xref,
+                "type": t,
+                "kind": ANNOT_KINDS.get(t, annot.type[1]),
+                "rect": (annot.rect * page.rotation_matrix).normalize(),
+                "text": info.get("content", ""),
+                "title": info.get("title", ""),
+                "movable": t not in MARKUP_TYPES,
+                "stroke": None,
+                "fontsize": None,
+            }
+            if t == fitz.PDF_ANNOT_FREE_TEXT:
+                col, size = _parse_da(doc.xref_get_key(annot.xref, "DA")[1])
+                d["stroke"], d["fontsize"] = col, size
+            else:
+                c = annot.colors.get("stroke") or annot.colors.get("fill") or []
+                d["stroke"] = tuple(c[:3]) if len(c) >= 3 else None
+            out.append(d)
+        return out
+
+    def annot_at(self, index: int, point: tuple[float, float], pad: float = 0.0) -> dict | None:
+        """表示座標 point にある注釈（重なっていれば後のもの）。無ければ None。"""
+        pt = fitz.Point(*point)
+        hits = []
+        for a in self.annots_on_page(index):
+            r = fitz.Rect(a["rect"])
+            r.x0 -= pad; r.y0 -= pad; r.x1 += pad; r.y1 += pad
+            if r.contains(pt):
+                hits.append(a)
+        return hits[-1] if hits else None
+
+    def _find_annot(self, page, xref: int):
+        for annot in page.annots():
+            if annot.xref == xref:
+                return annot
+        raise ValueError("注釈が見つかりません。")
+
+    def add_markup(self, index: int, kind: str, rects: Sequence, color: tuple[float, float, float] | None = None) -> int:
+        """文字の範囲（表示座標の矩形列）に蛍光ペン / 下線 / 取り消し線を付ける。注釈の xref を返す。"""
+        doc = self._require()
+        page = doc[index]
+        t = MARKUP_KINDS[kind]
+        quads = [(fitz.Rect(r) * page.derotation_matrix).normalize() for r in rects]
+        if not quads:
+            raise ValueError("対象の文字が選択されていません。")
+        self._push_undo()
+        if t == fitz.PDF_ANNOT_HIGHLIGHT:
+            annot = page.add_highlight_annot(quads)
+        elif t == fitz.PDF_ANNOT_UNDERLINE:
+            annot = page.add_underline_annot(quads)
+        else:
+            annot = page.add_strikeout_annot(quads)
+        if color is not None:
+            annot.set_colors(stroke=color)
+        annot.update()
+        self.modified = True
+        return annot.xref
+
+    def add_free_text(self, index: int, point: tuple[float, float], text: str, fontsize: float = 12,
+                      color: tuple[float, float, float] = (0.85, 0.1, 0.1)) -> int:
+        """表示座標 point を左上として、文字を書き込むテキスト注釈を置く。注釈の xref を返す。
+        大きさは文字数と行数から決める（ページ右端・下端で切る）。"""
+        doc = self._require()
+        page = doc[index]
+        prect = page.rect * page.rotation_matrix
+        pw, ph = prect.width, prect.height
+        lines = text.split("\n") or [""]
+        width = max(fitz.get_text_length(ln, fontname="japan", fontsize=fontsize) for ln in lines) + fontsize + 6
+        height = len(lines) * fontsize * 1.35 + 8
+        x, y = point
+        x = max(0.0, min(x, pw - 20))
+        y = max(0.0, min(y, ph - 20))
+        width = min(width, pw - x)
+        height = min(height, ph - y)
+        rect = (fitz.Rect(x, y, x + width, y + height) * page.derotation_matrix).normalize()
+        self._push_undo()
+        annot = page.add_freetext_annot(rect, text, fontsize=fontsize, fontname="japan", text_color=color,
+                                        rotate=page.rotation)
+        annot.update()
+        self.modified = True
+        return annot.xref
+
+    def set_annot_text(self, index: int, xref: int, text: str) -> None:
+        """付箋・テキスト注釈の内容を変更する。"""
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        self._push_undo()
+        annot.set_info(content=text)
+        if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
+            col, size = _parse_da(doc.xref_get_key(xref, "DA")[1])
+            annot.update(fontname="japan", fontsize=size, text_color=col)
+        else:
+            annot.update()
+        self.modified = True
+
+    def set_annot_color(self, index: int, xref: int, color: tuple[float, float, float]) -> None:
+        """注釈の色（テキスト注釈は文字色、それ以外は線・マーカーの色）を変更する。"""
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        self._push_undo()
+        if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
+            _col, size = _parse_da(doc.xref_get_key(xref, "DA")[1])
+            annot.update(fontname="japan", fontsize=size, text_color=color)
+        else:
+            annot.set_colors(stroke=color)
+            annot.update()
+        self.modified = True
+
+    def set_annot_fontsize(self, index: int, xref: int, fontsize: float) -> None:
+        """テキスト注釈の文字サイズを変更する（枠の大きさも合わせて変える）。"""
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        if annot.type[0] != fitz.PDF_ANNOT_FREE_TEXT:
+            raise ValueError("文字サイズを変えられるのはテキスト注釈だけです。")
+        col, old = _parse_da(doc.xref_get_key(xref, "DA")[1])
+        self._push_undo()
+        k = fontsize / (old or fontsize)
+        r = (annot.rect * page.rotation_matrix).normalize()   # 表示上の左上を固定して拡縮
+        disp = fitz.Rect(r.x0, r.y0, r.x0 + r.width * k, r.y0 + r.height * k)
+        annot.set_rect((disp * page.derotation_matrix).normalize())
+        annot.update(fontname="japan", fontsize=fontsize, text_color=col)
+        self.modified = True
+
+    def move_annot(self, index: int, xref: int, dx: float, dy: float) -> None:
+        """注釈を表示座標で (dx, dy) だけ動かす。蛍光ペンなど文字に付く注釈は動かせない。"""
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        if annot.type[0] in MARKUP_TYPES:
+            raise ValueError(f"{ANNOT_KINDS.get(annot.type[0], '')}は文字の位置に付くので移動できません。")
+        if abs(dx) < 0.01 and abs(dy) < 0.01:
+            return
+        self._push_undo()
+        disp = (annot.rect * page.rotation_matrix).normalize() + (dx, dy, dx, dy)
+        annot.set_rect((disp * page.derotation_matrix).normalize())
+        if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
+            col, size = _parse_da(doc.xref_get_key(xref, "DA")[1])
+            annot.update(fontname="japan", fontsize=size, text_color=col)
+        else:
+            annot.update()
+        self.modified = True
+
+    def remove_annot(self, index: int, xref: int) -> None:
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        self._push_undo()
+        page.delete_annot(annot)
+        self.modified = True
+
     # ------------------------------------------------------------ しおり / 目次（アウトライン）
     def get_toc(self) -> list[list]:
         """[[レベル, タイトル, ページ番号(1 始まり)], ...]。目次の無い PDF は空リスト。"""
@@ -346,10 +575,18 @@ class PdfModel:
         target = path or self.path
         if not target:
             raise ValueError("保存先が指定されていません。")
-        _atomic_write(target, doc.tobytes(garbage=3, deflate=True))
+        _atomic_write(target, self._output_bytes())
         self.path = target
         self.modified = False
         return target
+
+    def _output_bytes(self) -> bytes:
+        """保存用のバイト列。パスワード付きで開いた（または設定した）文書は同じパスワードで暗号化し直す。"""
+        doc = self._require()
+        if self.password:
+            return doc.tobytes(garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_AES_256,
+                               user_pw=self.password, owner_pw=self.password, permissions=self.permissions)
+        return doc.tobytes(garbage=3, deflate=True)
 
     # ------------------------------------------------------------ 描画
     def render(self, index: int, scale: float = 1.0, max_width: int | None = None):
@@ -378,6 +615,29 @@ class PdfModel:
         page = self._require()[index]
         r = page.rect
         return f"{r.width / 72 * 25.4:.0f} x {r.height / 72 * 25.4:.0f} mm  回転 {page.rotation}°"
+
+
+def _open_bytes(data: bytes, path: str, password: str | None) -> fitz.Document:
+    """バイト列から PDF を開く。パスワードが必要なら（または違えば）PasswordRequired。"""
+    doc = fitz.open(stream=data, filetype="pdf")
+    if doc.needs_pass:
+        if not password or not doc.authenticate(password):
+            doc.close()
+            raise PasswordRequired(path, wrong=bool(password))
+    return doc
+
+
+def _parse_da(da: str) -> tuple[tuple[float, float, float], float]:
+    """テキスト注釈の既定外観 (/DA) から (文字色, 文字サイズ) を取り出す。無ければ黒・12pt。"""
+    col = (0.0, 0.0, 0.0)
+    size = 12.0
+    m = _DA_COLOR_RE.search(da or "")
+    if m:
+        col = tuple(float(v) for v in m.groups())
+    m = _DA_FONT_RE.search(da or "")
+    if m and float(m.group(1)) > 0:
+        size = float(m.group(1))
+    return col, size
 
 
 def _atomic_write(path: str, data: bytes) -> None:
