@@ -65,3 +65,11 @@ Root: HKA; Subkey: "Software\Classes\Applications\{#AppExe}\SupportedTypes"; Val
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#StringChange(AppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; アプリ内の自動アップデートからサイレント実行されたとき (/SILENT /LAUNCH=1) は、完了後にアプリを起動し直す
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WantsLaunch
+
+[Code]
+function WantsLaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:LAUNCH|0}') = '1';
+end;
