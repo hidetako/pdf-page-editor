@@ -117,9 +117,33 @@ def download_installer(info: UpdateInfo, progress: Callable[[int, int], bool] | 
     return dest
 
 
-def installer_args(path: str) -> list[str]:
-    """インストーラーをサイレント実行し、完了後にアプリを起動させる引数（Inno Setup）。"""
-    return [path, "/SILENT", "/NORESTART", "/LAUNCH=1"]
+def install_scope_arg(exe_path: str | None, env: dict | None = None) -> str:
+    """実行中の exe の場所から、インストーラーに渡すインストール範囲を決める。
+
+    Program Files 配下で動いていれば /ALLUSERS（全ユーザー用）、それ以外（%LOCALAPPDATA%\\Programs など）は
+    /CURRENTUSER（現在のユーザー用）。更新を必ず同じ場所へ上書きさせ、別の範囲に二重インストールされて
+    「プログラムから開く」に同名の項目が 2 つ並ぶのを防ぐ。
+    """
+    env = os.environ if env is None else env
+
+    def norm(p: str) -> str:
+        return p.replace("\\", "/").rstrip("/").lower()
+
+    if exe_path:
+        exe = norm(exe_path)
+        for key in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432"):
+            d = env.get(key)
+            if d and exe.startswith(norm(d) + "/"):
+                return "/ALLUSERS"
+    return "/CURRENTUSER"
+
+
+def installer_args(path: str, exe_path: str | None = None, env: dict | None = None) -> list[str]:
+    """インストーラーをサイレント実行し、完了後にアプリを起動させる引数（Inno Setup）。
+
+    exe_path は今動いているアプリの exe。その場所に合わせて /ALLUSERS か /CURRENTUSER を付ける。
+    """
+    return [path, "/SILENT", "/NORESTART", "/LAUNCH=1", install_scope_arg(exe_path, env)]
 
 
 def _http_get(url: str) -> bytes:
