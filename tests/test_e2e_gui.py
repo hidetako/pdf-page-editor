@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pymupdf as fitz
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QUrl, Qt
-from PySide6.QtGui import QDropEvent, QWheelEvent
+from PySide6.QtGui import QColor, QDropEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
@@ -126,16 +126,40 @@ def main():
     shot(win, "empty")
 
     # ---------------------------------------------------------------- 開く（エラー系）
-    step("開く: 壊れた PDF / パスワード付き PDF はエラー表示で継続")
+    step("開く: 壊れた PDF はエラー表示で継続。パスワード付き PDF は入力を求め、キャンセル / 間違い→再入力 / 正解で開く")
     QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (broken, ""))
     win.a_open.trigger(); wait()
     assert len(errors) == 1 and win.model.doc is None
     QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: (locked, ""))
+    asked = []
+    win._ask_password = lambda path, wrong=False: asked.append(wrong) or None     # キャンセル
     win.a_open.trigger(); wait()
-    assert len(errors) == 2 and "パスワード" in errors[-1]
+    assert asked == [False] and win.model.doc is None and len(errors) == 1, "キャンセルは何も開かずエラーも出ない"
+    answers = iter(["bad", "x"])
+    win._ask_password = lambda path, wrong=False: asked.append(wrong) or next(answers)
+    win.a_open.trigger(); wait(100)
+    assert asked == [False, False, True], asked
+    assert win.model.page_count == 1 and win.model.password == "x" and "パスワード保護" in win.page_label.text()
+    assert "パスワード付き" in win.statusBar().currentMessage()
+    # 編集して保存してもパスワード付きのまま。解除すると平文になる
+    enc_out = os.path.join(_TMP, "locked_out.pdf")
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (enc_out, ""))
+    win.a_rotr.trigger(); wait()
+    win.a_saveas.trigger(); wait(100)
+    _d = fitz.open(enc_out); assert _d.needs_pass and _d.authenticate("x") and _d[0].rotation == 90; _d.close()
+    win._ask_new_password = lambda current: ""     # 空 = 解除
+    win.a_password.trigger(); wait()
+    assert win.model.password is None and win.model.modified and "解除" in win.statusBar().currentMessage()
+    win.a_save.trigger(); wait(100)
+    _d = fitz.open(enc_out); assert not _d.needs_pass; _d.close()
+    win._ask_new_password = lambda current: "newpw"
+    win.a_password.trigger(); win.a_save.trigger(); wait(100)
+    _d = fitz.open(enc_out); assert _d.needs_pass and _d.authenticate("newpw") == 6; _d.close()
+    assert "パスワード保護" in win.page_label.text()
+    win.model.close(); win.refresh_thumbs(); wait()
     QFileDialog.getOpenFileName = staticmethod(lambda *a_, **k: ("", ""))
     win.a_open.trigger(); wait()
-    assert len(errors) == 2, "キャンセルは何も起きない"
+    assert len(errors) == 1 and win.model.doc is None, "キャンセルは何も起きない"
 
     # ---------------------------------------------------------------- 開く（正常）
     step("開く: Ctrl+O 相当で 5 ページを開き、サムネイル・タイトル・ステータスが更新")
@@ -291,8 +315,15 @@ def main():
     assert win.thumbs.selected_indices() == [1, 2, 3] and win.current == 1
     assert win.model.doc[3].rect.width > win.model.doc[3].rect.height, "画像ページは画像の縦横比"
     QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([locked], ""))
+    asked_ins = []
+    win._ask_password = lambda path, wrong=False: asked_ins.append(wrong) or None    # パスワード付きはキャンセル → 挿入しない
     win.a_insert.trigger(); wait()
-    assert "パスワード" in errors[-1] and win.model.page_count == 7
+    assert asked_ins == [False] and win.model.page_count == 7
+    win._ask_password = lambda path, wrong=False: "x"
+    win.a_insert.trigger(); wait(100)
+    assert win.model.page_count == 8 and win.thumbs.selected_indices() == [4], "正しいパスワードで挿入される"
+    QTest.keyClick(win, Qt.Key_Z, Qt.ControlModifier); wait()
+    assert win.model.page_count == 7
     QFileDialog.getOpenFileNames = staticmethod(lambda *a_, **k: ([], ""))
     win.a_insert.trigger(); wait()
     assert win.model.page_count == 7
@@ -783,6 +814,138 @@ def main():
     assert w8.selected_text == "" and len(w8.model.stamps_on_page(0)) == 1, "押印モードのドラッグは押印になる"
     QTest.keyClick(w8, Qt.Key_Escape); wait()
     w8.model.modified = False; assert w8.close()
+
+    step("注釈: 選択文字に蛍光ペン / 下線 / 取り消し線、F4 でテキスト注釈、ドラッグ移動、右クリックで編集・色・サイズ・削除、Undo、保存")
+    w9 = MainWindow(); w9.resize(1400, 900); w9.show(); wait(50)
+    w9.open_file(sel_pdf); wait(150)
+    words = w9.model.page_words(0)
+    # 注釈を付けるたびにページビューは作り直されるので、毎回 w9.view を引き直す
+    ox, oy, pw, ph = w9.view.pix_geometry(); pr = w9.model.doc[0].rect
+    def to_widget9(r, fx=0.5, fy=0.5):
+        ox, oy, pw, ph = w9.view.pix_geometry()
+        return QPoint(int(ox + (r.x0 + (r.x1 - r.x0) * fx) * pw / pr.width), int(oy + (r.y0 + (r.y1 - r.y0) * fy) * ph / pr.height))
+    assert not w9.a_highlight.isEnabled() and not w9.a_underline.isEnabled() and not w9.a_strikeout.isEnabled(), "選択なしではマーカー不可"
+    w9.apply_markup("highlight"); wait()
+    assert "選択" in w9.statusBar().currentMessage() and w9.model.annots_on_page(0) == []
+    # "Hello World" を選んで Ctrl+Shift+H
+    start = to_widget9(words[0]["rect"]); end = to_widget9(words[1]["rect"])
+    QTest.mousePress(w9.view, Qt.LeftButton, Qt.NoModifier, start); mouse_move(w9.view, end, Qt.LeftButton); QTest.mouseRelease(w9.view, Qt.LeftButton, Qt.NoModifier, end); wait(100)
+    assert w9.selected_text == "Hello World" and w9.a_highlight.isEnabled()
+    QTest.keyClick(w9, Qt.Key_H, Qt.ControlModifier | Qt.ShiftModifier); wait(150)
+    ann = w9.model.annots_on_page(0)
+    assert [a["kind"] for a in ann] == ["蛍光ペン"] and ann[0]["stroke"] == (1.0, 1.0, 0.0), ann
+    assert ann[0]["rect"].contains(fitz.Rect(words[0]["rect"])) and not ann[0]["movable"]
+    assert w9.selected_text == "" and not w9.a_highlight.isEnabled(), "マーカー後は選択解除"
+    assert "蛍光ペン" in w9.statusBar().currentMessage()
+    # 右クリックメニューから下線・取り消し線（2 行目の日本語）
+    picks = []
+    def pick9(label):
+        def f(menu, gpos):
+            acts = {x.text(): x for x in menu.actions() if not x.isSeparator()}
+            picks.append(sorted(acts))
+            if label in acts:
+                acts[label].trigger()
+        return f
+    jp = words[4]["rect"]
+    QTest.mousePress(w9.view, Qt.LeftButton, Qt.NoModifier, to_widget9(jp, 0.1)); mouse_move(w9.view, to_widget9(jp, 0.9), Qt.LeftButton); QTest.mouseRelease(w9.view, Qt.LeftButton, Qt.NoModifier, to_widget9(jp, 0.9)); wait(100)
+    assert w9.selected_text == "稟議書"
+    w9._popup_menu = pick9("下線")
+    QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, to_widget9(jp), w9.view.mapToGlobal(to_widget9(jp)))); wait(100)
+    assert picks[-1][:4] == ["コピー", "下線", "取り消し線", "蛍光ペン"] or set(["コピー", "蛍光ペン", "下線", "取り消し線"]) <= set(picks[-1]), picks[-1]
+    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "下線"]
+    QTest.mousePress(w9.view, Qt.LeftButton, Qt.NoModifier, to_widget9(words[5]["rect"], 0.1)); mouse_move(w9.view, to_widget9(words[5]["rect"], 0.9), Qt.LeftButton); QTest.mouseRelease(w9.view, Qt.LeftButton, Qt.NoModifier, to_widget9(words[5]["rect"], 0.9)); wait(100)
+    QTest.keyClick(w9, Qt.Key_K, Qt.ControlModifier | Qt.ShiftModifier); wait(150)
+    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "下線", "取り消し線"]
+    # 蛍光ペンの上で右クリック: 色変更・削除。色を緑に
+    hl = w9.model.annots_on_page(0)[0]
+    on_hl = to_widget9(hl["rect"])
+    w9._ask_color = lambda initial, title: QColor(0, 255, 0)
+    w9._popup_menu = pick9("蛍光ペンの色を変更...")
+    QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_hl, w9.view.mapToGlobal(on_hl))); wait(100)
+    assert "この蛍光ペンを削除" in picks[-1] and "テキスト注釈を編集..." not in picks[-1], picks[-1]
+    assert w9.model.annots_on_page(0)[0]["stroke"] == (0.0, 1.0, 0.0)
+    mouse_move(w9.view, on_hl); wait(100)
+    assert QToolTip.text().startswith("蛍光ペン") and w9.view.cursor().shape() != Qt.SizeAllCursor, QToolTip.text()
+    # 蛍光ペンはドラッグしても動かない（文字選択にもならない）
+    QTest.mousePress(w9.view, Qt.LeftButton, Qt.NoModifier, on_hl); mouse_move(w9.view, QPoint(on_hl.x() + 60, on_hl.y() + 60), Qt.LeftButton); QTest.mouseRelease(w9.view, Qt.LeftButton, Qt.NoModifier, QPoint(on_hl.x() + 60, on_hl.y() + 60)); wait(100)
+    assert w9.model.annots_on_page(0)[0]["rect"] == hl["rect"]
+    QTest.keyClick(w9, Qt.Key_Escape); wait()
+    # F4 → クリックでテキスト注釈（日本語）
+    w9._ask_text = lambda title, label, default="": "確認済み\n田中"
+    QTest.keyClick(w9, Qt.Key_F4); wait()
+    assert w9.text_mode and w9.a_text.isChecked() and w9.view.text_mode and w9.view.cursor().shape() == Qt.CrossCursor
+    at = QPoint(int(ox + pw * 0.55), int(oy + ph * 0.5))
+    QTest.mouseClick(w9.view, Qt.LeftButton, Qt.NoModifier, at); wait(150)
+    ft = [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"]
+    assert len(ft) == 1 and ft[0]["text"] == "確認済み\n田中" and ft[0]["movable"] and ft[0]["fontsize"] == 12.0, ft
+    assert abs(ft[0]["rect"].x0 - pr.width * 0.55) < 3 and abs(ft[0]["rect"].y0 - pr.height * 0.5) < 3
+    assert w9.text_mode, "連続して置けるようモードは継続"
+    QTest.keyClick(w9, Qt.Key_Escape); wait()
+    assert not w9.text_mode and not w9.a_text.isChecked() and w9.view.cursor().shape() == Qt.ArrowCursor
+    # 描画されている（注釈の位置に赤っぽい画素）
+    pix = w9.model.render(0, 1.0); r = ft[0]["rect"]
+    reds = 0
+    for yy in range(int(r.y0), int(r.y1)):
+        for xx in range(int(r.x0), int(r.x1)):
+            cr, cg, cb = pix.pixel(xx, yy)
+            if cr > 150 and cg < 100 and cb < 100:
+                reds += 1
+    assert reds > 20, reds
+    # ホバー: ツールチップと移動カーソル。ドラッグで移動
+    on_ft = to_widget9(ft[0]["rect"], 0.3, 0.5)
+    mouse_move(w9.view, on_ft); wait(100)
+    assert "テキスト注釈: 確認済み" in QToolTip.text() and "移動" in QToolTip.text() and w9.view.cursor().shape() == Qt.SizeAllCursor, QToolTip.text()
+    dest = QPoint(on_ft.x() - 150, on_ft.y() + 80)
+    QTest.mousePress(w9.view, Qt.LeftButton, Qt.NoModifier, on_ft); wait()
+    mouse_move(w9.view, QPoint(on_ft.x() - 50, on_ft.y() + 20), Qt.LeftButton); wait()
+    assert w9.view.move_rect is not None and w9.drag_annot is not None, "移動中は枠を表示"
+    mouse_move(w9.view, dest, Qt.LeftButton); wait()
+    QTest.mouseRelease(w9.view, Qt.LeftButton, Qt.NoModifier, dest); wait(150)
+    ft2 = [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]
+    assert w9.view.move_rect is None and w9.drag_annot is None and w9.selected_text == ""
+    assert abs((ft2["rect"].x0 - ft[0]["rect"].x0) - (-150) * pr.width / pw) < 3 and abs((ft2["rect"].y0 - ft[0]["rect"].y0) - 80 * pr.height / ph) < 3, (ft[0]["rect"], ft2["rect"])
+    assert "移動しました" in w9.statusBar().currentMessage()
+    shot(w9, "annots")
+    # 右クリック: 編集 / 文字サイズ / 色 / 削除
+    on_ft2 = to_widget9(ft2["rect"], 0.3, 0.5)
+    w9._ask_text = lambda title, label, default="": default.replace("田中", "佐藤")
+    w9._popup_menu = pick9("テキスト注釈を編集...")
+    QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
+    assert {"テキスト注釈を編集...", "文字サイズを変更...", "テキスト注釈の色を変更...", "このテキスト注釈を削除"} <= set(picks[-1]), picks[-1]
+    assert [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]["text"] == "確認済み\n佐藤"
+    w9._ask_line = lambda title, label, default="": "18"
+    w9._popup_menu = pick9("文字サイズを変更...")
+    QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
+    ft3 = [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]
+    assert ft3["fontsize"] == 18.0 and ft3["rect"].width > ft2["rect"].width and abs(ft3["rect"].x0 - ft2["rect"].x0) < 0.5, (ft2["rect"], ft3["rect"])
+    w9._ask_color = lambda initial, title: QColor(0, 0, 255)
+    w9._popup_menu = pick9("テキスト注釈の色を変更...")
+    QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
+    assert [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]["stroke"] == (0.0, 0.0, 1.0)
+    w9._popup_menu = pick9("このテキスト注釈を削除")
+    QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
+    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "下線", "取り消し線"] and "削除" in w9.statusBar().currentMessage()
+    QTest.keyClick(w9, Qt.Key_Z, Qt.ControlModifier); wait()
+    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "下線", "取り消し線", "テキスト注釈"], "Undo で戻る"
+    w9._popup_menu = pick9("この下線を削除")
+    ul = w9.model.annots_on_page(0)[1]; on_ul = to_widget9(ul["rect"])
+    QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ul, w9.view.mapToGlobal(on_ul))); wait(100)
+    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "取り消し線", "テキスト注釈"]
+    # 保存して他のビューアで読める形（標準の注釈）になっている
+    annot_out = os.path.join(_TMP, "annots.pdf")
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (annot_out, ""))
+    w9.a_saveas.trigger(); wait(100)
+    _d = fitz.open(annot_out)
+    assert [a.type[1] for a in _d[0].annots()] == ["Highlight", "StrikeOut", "FreeText"], [a.type[1] for a in _d[0].annots()]
+    assert [a.info["content"] for a in _d[0].annots()][-1] == "確認済み\n佐藤"
+    _d.close()
+    # 開き直しても既存の注釈として編集できる（色変更）
+    w9.open_file(annot_out); wait(150)
+    ann = w9.model.annots_on_page(0)
+    assert [a["kind"] for a in ann] == ["蛍光ペン", "取り消し線", "テキスト注釈"] and ann[0]["stroke"] == (0.0, 1.0, 0.0) and ann[2]["fontsize"] == 18.0
+    w9.recolor_annot(0, ann[1]["xref"]); wait()
+    assert w9.model.annots_on_page(0)[1]["stroke"] == (0.0, 0.0, 1.0)
+    w9.model.modified = False; assert w9.close()
 
     step("自動アップデート: 最新なら「最新です」、新版なら更新ダイアログ、スキップは記憶、更新するとダウンロード→インストーラー起動→終了")
     import io, json
