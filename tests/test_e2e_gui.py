@@ -784,6 +784,75 @@ def main():
     QTest.keyClick(w8, Qt.Key_Escape); wait()
     w8.model.modified = False; assert w8.close()
 
+    step("自動アップデート: 最新なら「最新です」、新版なら更新ダイアログ、スキップは記憶、更新するとダウンロード→インストーラー起動→終了")
+    import io, json
+    from updater import DOWNLOAD_PREFIX
+    QSettings.setDefaultFormat(QSettings.IniFormat)
+    QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, os.path.join(_TMP, "qsettings_upd"))
+    w7 = MainWindow(); w7.show(); wait(50)
+    assert w7.a_auto_update.isChecked(), "既定で起動時チェックは ON"
+    assert not w7.auto_update_enabled(), "ソース実行（exe 化していない）では起動時チェックしない"
+    def rel(tag):
+        return lambda url: json.dumps({"tag_name": tag, "html_url": "https://github.com/hidetako/pdf-page-editor/releases/tag/" + tag, "body": "notes",
+                                       "draft": False, "prerelease": False,
+                                       "assets": [{"name": f"PdfPageEditor-Setup-{tag[1:]}.exe", "size": 2048,
+                                                   "browser_download_url": DOWNLOAD_PREFIX + f"{tag}/PdfPageEditor-Setup-{tag[1:]}.exe"}]}).encode()
+    def run_check(w, manual, fetch):
+        w.check_for_update(manual=manual, fetch=fetch); w._update_thread.wait(); wait(100)
+    # 最新 → 手動なら「最新です」
+    run_check(w7, True, rel("v" + appmod.__version__))
+    assert infos and "最新です" in infos[-1], infos[-1:]
+    # 通信エラー → 自動では黙る、手動では警告
+    warns = []
+    QMessageBox.warning = staticmethod(lambda *a_, **k: warns.append(a_[2]) or QMessageBox.Ok)
+    def offline(url): raise OSError("offline")
+    run_check(w7, False, offline); assert not warns
+    run_check(w7, True, offline); assert warns and "確認できませんでした" in warns[-1]
+    # 新版 → ダイアログ（差し替え）で「スキップ」→ 記憶され、次回の自動チェックでは出ない
+    shown = []
+    def choose(label):
+        def _exec(dlg):
+            shown.append(dlg.windowTitle())
+            for b in dlg.buttons():
+                if b.text() == label:
+                    b.click(); return 0
+            raise AssertionError(f"ボタンが無い: {label} / {[b.text() for b in dlg.buttons()]}")
+        return _exec
+    w7._exec_dialog = choose("このバージョンをスキップ")
+    run_check(w7, False, rel("v9.9.9"))
+    assert shown == ["新しいバージョン"] and w7._settings().value("update/skip_version") == "9.9.9"
+    run_check(w7, False, rel("v9.9.9")); assert len(shown) == 1, "スキップ済みの版は自動では出ない"
+    run_check(w7, True, rel("v9.9.9")); assert len(shown) == 2, "手動確認ならスキップ済みでも出る"
+    # 「更新する」→（exe 版相当の環境変数）ダウンロード → インストーラー起動 → 終了
+    os.environ["PDFPE_UPDATE_CHECK"] = "1"
+    launched = []
+    w7._launch_installer = lambda path: launched.append(path)
+    data = os.urandom(2048)
+    class FakeResp(io.BytesIO):
+        headers = {}
+    w7_download = w7._download_with_progress
+    w7._download_with_progress = lambda info, opener=None: w7_download(info, lambda url: FakeResp(data))
+    def exec_update(dlg):
+        if dlg.windowTitle() == "新しいバージョン":
+            return choose("更新する")(dlg)
+        # 進捗ダイアログ: ダウンロード完了（accept）まで待つ
+        for _ in range(300):
+            QApplication.processEvents(); QTest.qWait(10)
+            if dlg.result() == 1:
+                break
+        return dlg.result()
+    w7._exec_dialog = exec_update
+    run_check(w7, False, rel("v9.9.8")); wait(200)
+    assert launched and launched[0].endswith("PdfPageEditor-Setup-9.9.8.exe") and open(launched[0], "rb").read() == data
+    assert not w7.isVisible(), "インストーラー起動後にアプリは終了する"
+    os.remove(launched[0])
+    del os.environ["PDFPE_UPDATE_CHECK"]
+    # 起動時チェックの ON/OFF は設定に保存される
+    w8 = MainWindow(); w8.show(); wait(50)
+    w8.a_auto_update.trigger(); wait()
+    assert not w8.a_auto_update.isChecked() and w8._settings().value("update/check_on_start", type=bool) is False
+    assert w8.close()
+
     step("変更なしで開き直し: 確認ダイアログは出ない")
     asked = []
     QMessageBox.question = staticmethod(lambda *a_, **k: asked.append(1) or QMessageBox.Cancel)

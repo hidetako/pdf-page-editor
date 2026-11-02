@@ -11,6 +11,7 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 - 元に戻す / やり直し（20 段階）
 - 保存（上書き）/ 名前を付けて保存。一時ファイル経由のアトミック書き込み
 - ウィンドウへのファイルドロップで開く / 追加
+- 自動アップデート（インストール版）。起動時に GitHub Releases の新しい版を確認し、「更新する」でダウンロード→インストール→再起動。「ヘルプ > 起動時に更新を確認」で OFF にできる
 - 印刷（Ctrl+P）。すべて / 現在のページ / 選択ページ / 範囲指定、部数、用紙に合わせて拡大縮小。横長ページは自動で回転
 
 未対応: パスワード付き PDF、注釈・テキスト編集。
@@ -64,7 +65,8 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 - `stamp_ui.py` : 印鑑パネルと印鑑編集ダイアログ
 - `app.py`      : PySide6 GUI 本体
 - `installer/PdfPageEditor.iss` : Inno Setup のインストーラー定義
-- `tests/test_model.py`, `tests/test_stamps.py`, `tests/test_notes_toc.py` : 自動テスト（直接実行）
+- `updater.py`   : 自動アップデート（GitHub Releases の確認とダウンロード、Qt 非依存）
+- `tests/test_model.py`, `tests/test_stamps.py`, `tests/test_notes_toc.py`, `tests/test_updater.py` : 自動テスト（直接実行）
 - `tests/test_e2e_gui.py` : GUI の E2E テスト（オフスクリーンで実際の画面を操作。`E2E_SHOTS=出力先` で各段階のスクリーンショットを保存）
 
 ## ライセンス

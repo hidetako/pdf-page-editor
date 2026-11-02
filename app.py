@@ -5,11 +5,13 @@ PySide6 + PyMuPDF。Windows では build_windows.bat で単一 exe にできる�
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import webbrowser
 
 import numpy as np
 import pymupdf as fitz
-from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDragEnterEvent, QDropEvent, QIcon, QImage,
                            QKeySequence, QPainter, QPixmap)
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
@@ -19,11 +21,12 @@ from PySide6.QtWidgets import (QApplication, QDockWidget, QFileDialog, QHBoxLayo
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from pdfmodel import IMAGE_EXTS, PdfModel
+import updater
 from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, random_tilt
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.2.0"
+__version__ = "1.3.0"
 
 
 def resource_path(rel: str) -> str:
@@ -246,6 +249,44 @@ class PageView(QLabel):
             p.end()
 
 
+class _UpdateCheckThread(QThread):
+    done = Signal(object, str)   # UpdateInfo | None, エラー文
+
+    def __init__(self, current: str, fetch, parent=None):
+        super().__init__(parent)
+        self._current, self._fetch = current, fetch
+
+    def run(self):
+        try:
+            self.done.emit(updater.check_for_update(self._current, self._fetch), "")
+        except Exception as e:
+            self.done.emit(None, str(e) or type(e).__name__)
+
+
+class _DownloadThread(QThread):
+    progress = Signal(int, int)
+    done = Signal()
+
+    def __init__(self, info, parent=None, opener=None):
+        super().__init__(parent)
+        self._info, self._opener = info, opener
+        self._cancel = False
+        self.path, self.error = "", ""
+
+    def cancel(self):
+        self._cancel = True
+
+    def run(self):
+        def prog(r, t):
+            self.progress.emit(r, t)
+            return not self._cancel
+        try:
+            self.path = updater.download_installer(self._info, prog, self._opener)
+        except Exception as e:
+            self.error = str(e) or type(e).__name__
+        self.done.emit()
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -269,6 +310,9 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._update_actions()
         self._restore_layout()
+        self._update_thread = None
+        if self.auto_update_enabled():
+            QTimer.singleShot(1500, lambda: self.check_for_update(manual=False))   # 起動直後は画面を優先
         # 起動時は印鑑パネルを閉じておく（押印モードに入ると自動で開く。メニュー「印鑑 > 印鑑パネルを表示」でも開ける）
         self.stamp_dock.hide()
 
@@ -427,6 +471,13 @@ class MainWindow(QMainWindow):
         self.stamp_dock.visibilityChanged.connect(a_dock.setChecked)
         # メニュー/ツールバーに載せないアクションは、ウィンドウに addAction しないとショートカットが効かない
         self.addAction(act("キャンセル（押印・付箋モード終了）", self._cancel_modes, "Esc", None, toolbar=False))
+        act("更新を確認...", lambda: self.check_for_update(manual=True), None, hmenu, toolbar=False,
+            tip="GitHub Releases に新しいバージョンがあるか調べ、あればダウンロードして更新します")
+        self.a_auto_update = act("起動時に更新を確認", self._toggle_auto_update, None, hmenu, toolbar=False,
+                                 tip="起動時に自動で新しいバージョンを調べる（インストール版のみ）")
+        self.a_auto_update.setCheckable(True)
+        self.a_auto_update.setChecked(self._settings().value("update/check_on_start", True, type=bool))
+        hmenu.addSeparator()
         act("バージョン情報", self.show_about, None, hmenu, toolbar=False)
 
         tb.addSeparator()
@@ -548,6 +599,106 @@ class MainWindow(QMainWindow):
         auto = s.value("auto_toc_panel", True)
         self.auto_toc_panel = auto in (True, "true", "True", 1, "1")
         self.a_auto_toc.setChecked(self.auto_toc_panel)
+
+    # ------------------------------------------------------------ 自動アップデート
+    def auto_update_enabled(self) -> bool:
+        """起動時チェックを行うか。インストール版（PyInstaller で exe 化）だけ。開発時は環境変数 PDFPE_UPDATE_CHECK=1 で有効化。"""
+        frozen = bool(getattr(sys, "frozen", False)) or os.environ.get("PDFPE_UPDATE_CHECK") == "1"
+        return frozen and self._settings().value("update/check_on_start", True, type=bool)
+
+    def _toggle_auto_update(self, on: bool):
+        self._settings().setValue("update/check_on_start", bool(on))
+
+    def check_for_update(self, manual: bool = False, fetch=None):
+        """バックグラウンドで最新版を調べる。manual=True ならメニューからの実行で、結果を必ず知らせる。"""
+        if self._update_thread is not None and self._update_thread.isRunning():
+            return
+        self._update_thread = _UpdateCheckThread(__version__, fetch, self)
+        self._update_thread.done.connect(lambda info, err: self._on_update_checked(info, err, manual))
+        self._update_thread.start()
+
+    def _on_update_checked(self, info, err: str, manual: bool):
+        if err:
+            if manual:
+                QMessageBox.warning(self, "更新の確認", f"更新を確認できませんでした。\n{err}")
+            return
+        if info is None:
+            if manual:
+                QMessageBox.information(self, "更新の確認", f"お使いのバージョン {__version__} は最新です。")
+            return
+        if not manual and self._settings().value("update/skip_version", "") == info.version:
+            return   # スキップ指定済み
+        self._offer_update(info)
+
+    def _offer_update(self, info):
+        box = QMessageBox(self)
+        box.setWindowTitle("新しいバージョン")
+        box.setIcon(QMessageBox.Information)
+        box.setText(f"<b>{APP_NAME} {info.version}</b> が公開されています（お使いのバージョンは {__version__}）。<br>"
+                    "今すぐ更新しますか？ 更新中はアプリをいったん終了し、完了後に自動で起動します。")
+        if info.notes:
+            box.setDetailedText(info.notes)
+        b_now = box.addButton("更新する", QMessageBox.AcceptRole)
+        box.addButton("後で", QMessageBox.RejectRole)
+        b_skip = box.addButton("このバージョンをスキップ", QMessageBox.DestructiveRole)
+        box.setDefaultButton(b_now)
+        self._exec_dialog(box)
+        clicked = box.clickedButton()
+        if clicked is b_skip:
+            self._settings().setValue("update/skip_version", info.version)
+        elif clicked is b_now:
+            self.apply_update(info)
+
+    def _exec_dialog(self, dlg) -> int:
+        """モーダルダイアログを表示する（テストではここを差し替える）。"""
+        return dlg.exec()
+
+    def apply_update(self, info, opener=None):
+        """インストーラーをダウンロードして実行し、アプリを終了する。ソースから実行中ならリリースページを開く。"""
+        if not getattr(sys, "frozen", False) and os.environ.get("PDFPE_UPDATE_CHECK") != "1":
+            webbrowser.open(info.page_url)
+            return
+        if not info.installer_url:
+            QMessageBox.warning(self, "更新", "このリリースにはインストーラーが含まれていません。リリースページを開きます。")
+            webbrowser.open(info.page_url)
+            return
+        if not self._confirm_discard():
+            return
+        path = self._download_with_progress(info, opener)
+        if not path:
+            return
+        self._save_layout()
+        self.model.modified = False   # 確認済みなので closeEvent で再度聞かない
+        try:
+            self._launch_installer(path)
+        except Exception as e:
+            self._error(e)
+            return
+        QTimer.singleShot(0, self.close)
+
+    def _download_with_progress(self, info, opener=None) -> str | None:
+        from PySide6.QtWidgets import QProgressDialog
+        dlg = QProgressDialog(f"{info.installer_name} をダウンロードしています...", "中止", 0, 100, self)
+        dlg.setWindowTitle("更新をダウンロード")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(False)
+        dlg.setValue(0)
+        th = _DownloadThread(info, self, opener)
+        th.progress.connect(lambda r, t: dlg.setValue(int(r * 100 / t) if t else 0))
+        th.done.connect(dlg.accept)
+        dlg.canceled.connect(th.cancel)
+        th.start()
+        self._exec_dialog(dlg)
+        th.wait()
+        if th.error:
+            if "中止" not in th.error:
+                QMessageBox.warning(self, "更新", f"ダウンロードに失敗しました。\n{th.error}")
+            return None
+        return th.path
+
+    def _launch_installer(self, path: str):
+        subprocess.Popen(updater.installer_args(path), close_fds=True)
 
     def show_about(self):
         QMessageBox.about(self, f"{APP_NAME} について",
