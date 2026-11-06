@@ -31,6 +31,10 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 - 「インポート」は JSON / .entstmp のほか、印影画像（PNG/JPG/BMP/GIF/TIFF/WebP、複数可）も受け付け、画像印として登録する。印鑑一覧へのドラッグ&ドロップでも可
 - アプリアイコン: `assets/icon.ico` / `assets/icon.png`（赤い角丸四角に白いリボン状の A。独自デザイン）。ウィンドウ・タスクバー・exe に適用
 
+## 説明書
+パソコンが苦手な方向けの「かんたん説明書」（A4、画面写真入り）: [docs/PDF_Page_Editor_かんたん説明書.pdf](docs/PDF_Page_Editor_かんたん説明書.pdf)。
+作り直すには `docs/manual_src/manual_shots.py 出力先` で画面写真を撮り、`docs/manual_src/build_manual.py 出力先 出力PDF 版番号` で組む（Linux のオフスクリーンで実行。reportlab と Noto Sans CJK が必要）。
+
 ## 動作環境
 - Windows 10 / 11 (64bit)、Python 3.10 以上（exe 化後は Python 不要）
 - ライブラリ: PyMuPDF (AGPL-3.0)、PySide6 (LGPL-3.0)
