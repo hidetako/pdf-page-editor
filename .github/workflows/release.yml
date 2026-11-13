@@ -44,6 +44,7 @@ jobs:
           python tests/test_stamps.py
           python tests/test_notes_toc.py
           python tests/test_updater.py
+          python tests/test_write.py
           python tests/test_e2e_gui.py
 
   build:
@@ -74,6 +75,7 @@ jobs:
           python tests/test_stamps.py
           python tests/test_notes_toc.py
           python tests/test_updater.py
+          python tests/test_write.py
 
       - name: Run GUI E2E on Windows (参考。Windows のオフスクリーンはフォント無し・寸法差があり、必須にしない)
         continue-on-error: true
@@ -107,6 +109,15 @@ jobs:
       - name: Build exe (PyInstaller)
         # PyMuPDF 2.x のレイアウト解析モデルは不要なので除外（同梱すると起動時に layout_rf*.yaml を探して失敗する）
         run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
+
+      - name: Self-test the packaged exe
+        # まとめた exe の中でも書き込み機能（埋め込みフォントの文字など）が動くか確かめる。失敗したら公開しない
+        shell: pwsh
+        run: |
+          $log = Join-Path $env:RUNNER_TEMP 'selftest.log'
+          $p = Start-Process -FilePath dist\PdfPageEditor.exe -ArgumentList '--selftest', $log -Wait -PassThru
+          if (Test-Path $log) { Get-Content $log -Encoding utf8 }
+          if ($p.ExitCode -ne 0) { throw "self-test failed (exit code $($p.ExitCode))" }
 
       - name: Build installer (Inno Setup)
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" installer\PdfPageEditor.iss'

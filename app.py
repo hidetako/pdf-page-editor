@@ -13,7 +13,7 @@ import numpy as np
 import pymupdf as fitz
 from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDragEnterEvent, QDropEvent, QIcon, QImage,
-                           QKeySequence, QPainter, QPen, QPixmap)
+                           QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygonF)
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
@@ -22,11 +22,13 @@ from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDia
 
 from pdfmodel import IMAGE_EXTS, PasswordRequired, PdfModel
 import updater
+from write_ui import DRAW_TOOLS, WriteRibbon, tool_icon
 from stamp_ui import StampDock, png_to_qpixmap
-from stamps import MM, StampLibrary, random_tilt
+from stamps import MM, StampLibrary, config_dir, random_tilt
+import fonts
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.4.0"
+__version__ = "1.5.0"
 
 
 def resource_path(rel: str) -> str:
@@ -46,7 +48,17 @@ DISPLAY_MODES = {
 }
 WARM_TINT = np.array([250, 240, 220], dtype=np.float32) / 255.0   # 白 → #FAF0DC
 NOTE_HIT_PAD = 4.0   # 付箋アイコンのクリック判定を広げる量 (pt)
-ANNOT_HIT_PAD = 2.0  # 注釈（マーカー・テキスト注釈など）のクリック判定を広げる量 (pt)
+ANNOT_HIT_PAD = 2.0  # 注釈（マーカー・文字・図形など）のクリック判定を広げる量 (pt)
+HANDLE_PX = 9        # 選択した注釈の右下に出す「大きさ変更」のつまみの一辺 (px)
+TOOL_HINTS = {
+    "select": "選択: 書き込んだものをクリックで選ぶ。ドラッグで移動、右下の四角で大きさ変更、Delete キーで削除",
+    "pen": "ペン: ドラッグして線を引きます（Esc で選択に戻る）",
+    "line": "直線: ドラッグして線を引きます（Esc で選択に戻る）",
+    "arrow": "矢印: ドラッグして矢印を引きます。離した側が矢の先（Esc で選択に戻る）",
+    "rect": "四角: ドラッグして囲みます（Esc で選択に戻る）",
+    "ellipse": "丸: ドラッグして囲みます（Esc で選択に戻る）",
+    "text": "文字: クリックした場所に文字を書き込みます。書いた文字はクリックで直せます（Esc で選択に戻る）",
+}
 INSERT_FILTER = "PDF / 画像 (*.pdf *.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp);;PDF (*.pdf);;画像 (*.png *.jpg *.jpeg *.bmp *.gif *.tif *.tiff *.webp)"
 
 
@@ -117,9 +129,10 @@ class PageView(QLabel):
     clicked = Signal(int, QPointF)  # ページ番号, ページ内の相対座標 (0〜1)
     context_requested = Signal(int, QPointF, QPoint)  # 右クリック: ページ番号, 相対座標, 画面座標
     hovered = Signal(int, QPointF, QPoint)  # マウス移動: ページ番号, 相対座標, 画面座標（付箋のツールチップ用）
-    drag_started = Signal(int, QPointF)      # 通常モードの左ドラッグ開始（テキスト選択）
+    drag_started = Signal(int, QPointF)      # 左ドラッグ開始（文字の選択・注釈の移動・描画）
     drag_moved = Signal(int, QPointF)
     drag_finished = Signal(int, QPointF)
+    double_clicked = Signal(int, QPointF)    # ダブルクリック（書いた文字・付箋の編集）
 
     def __init__(self, index: int):
         super().__init__()
@@ -133,8 +146,12 @@ class PageView(QLabel):
         self.stamp_mode = False
         self.note_mode = False
         self.text_mode = False
+        self.draw_mode = False              # ペン・直線・矢印・四角・丸（ドラッグして描く）
         self.selection_rects: list[tuple[float, float, float, float]] = []   # 選択強調（相対座標 0〜1）
         self.move_rect: tuple[float, float, float, float] | None = None       # ドラッグ移動中の注釈の枠（相対座標）
+        self.annot_box: tuple[float, float, float, float] | None = None       # 選択中の注釈の枠（相対座標）
+        self.annot_handle = False           # 右下に大きさ変更のつまみを出すか
+        self.preview: dict | None = None    # 描いている途中の線・図形 {"kind", "pts"(相対座標), "color", "width"(px), "opacity", "fill"}
         self._dragging = False
 
     def set_selection(self, rects: list[tuple[float, float, float, float]]):
@@ -150,26 +167,49 @@ class PageView(QLabel):
         return self.stamp_mode or self.note_mode or self.text_mode
 
     def _update_cursor(self):
-        self.setCursor(Qt.CrossCursor if self.click_mode else Qt.ArrowCursor)
+        self.setCursor(Qt.CrossCursor if (self.click_mode or self.draw_mode) else Qt.ArrowCursor)
 
+    # モードの設定は、再レイアウトのたびに同じ値で呼ばれる。実際に変わったときだけカーソルを付け直す
+    # （毎回付け直すと、注釈の上で出している移動カーソルなどが矢印に戻ってしまう）
     def set_stamp_mode(self, on: bool, ghost: QPixmap | None = None):
+        changed = self.stamp_mode != on
         self.stamp_mode = on
         self.ghost = ghost if on else None
         if not on:
             self.ghost_pos = None   # 押印モード継続中（再レイアウトでゴーストを差し替えるだけ）は位置を保つ
-        self._update_cursor()
+        if changed:
+            self._update_cursor()
         self.update()
 
     def set_note_mode(self, on: bool):
+        changed = self.note_mode != on
         self.note_mode = on
-        self._update_cursor()
+        if changed:
+            self._update_cursor()
 
     def set_text_mode(self, on: bool):
+        changed = self.text_mode != on
         self.text_mode = on
-        self._update_cursor()
+        if changed:
+            self._update_cursor()
+
+    def set_draw_mode(self, on: bool):
+        changed = self.draw_mode != on
+        self.draw_mode = on
+        if changed:
+            self._update_cursor()
 
     def set_move_rect(self, rect: tuple[float, float, float, float] | None):
         self.move_rect = rect
+        self.update()
+
+    def set_annot_box(self, rect: tuple[float, float, float, float] | None, handle: bool = False):
+        self.annot_box = rect
+        self.annot_handle = handle and rect is not None
+        self.update()
+
+    def set_preview(self, preview: dict | None):
+        self.preview = preview
         self.update()
 
     def pix_geometry(self) -> tuple[float, float, float, float] | None:
@@ -236,6 +276,14 @@ class PageView(QLabel):
                 return
         super().mousePressEvent(e)
 
+    def mouseDoubleClickEvent(self, e):
+        if e.button() == Qt.LeftButton and not self.click_mode and not self.draw_mode:
+            f = self._frac(e.position())
+            if f is not None:
+                self.double_clicked.emit(self.index, f)
+                return
+        super().mouseDoubleClickEvent(e)
+
     def contextMenuEvent(self, e):
         f = self._frac(e.pos())
         if f is not None:
@@ -265,6 +313,57 @@ class PageView(QLabel):
                 p.setPen(QPen(QColor(30, 120, 255), 2, Qt.DashLine))
                 p.setBrush(QColor(30, 120, 255, 40))
                 p.drawRect(int(ox + x0 * pw), int(oy + y0 * ph), max(1, int((x1 - x0) * pw)), max(1, int((y1 - y0) * ph)))
+                p.end()
+        if self.preview and len(self.preview.get("pts") or []) >= 2:
+            g = self.pix_geometry()
+            if g:
+                ox, oy, pw, ph = g
+                pv = self.preview
+                pts = [QPointF(ox + x * pw, oy + y * ph) for x, y in pv["pts"]]
+                p = QPainter(self)
+                p.setRenderHint(QPainter.Antialiasing)
+                p.setOpacity(float(pv.get("opacity", 1.0)))
+                col = pv["color"]
+                p.setPen(QPen(col, max(1.0, float(pv.get("width", 2.0))), Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+                p.setBrush(col if pv.get("fill") else Qt.NoBrush)
+                kind = pv["kind"]
+                if kind == "pen":
+                    path = QPainterPath(pts[0])
+                    for q in pts[1:]:
+                        path.lineTo(q)
+                    p.setBrush(Qt.NoBrush)
+                    p.drawPath(path)
+                elif kind in ("line", "arrow"):
+                    p.drawLine(pts[0], pts[-1])
+                    if kind == "arrow":
+                        import math
+                        a, b = pts[0], pts[-1]
+                        ang = math.atan2(b.y() - a.y(), b.x() - a.x())
+                        size = max(8.0, float(pv.get("width", 2.0)) * 4)
+                        head = [b] + [QPointF(b.x() - size * math.cos(ang + d), b.y() - size * math.sin(ang + d)) for d in (0.45, -0.45)]
+                        p.setBrush(col); p.drawPolygon(QPolygonF(head))
+                else:
+                    r = QRectF(pts[0], pts[-1]).normalized()
+                    if kind == "ellipse":
+                        p.drawEllipse(r)
+                    else:
+                        p.drawRect(r)
+                p.end()
+        if self.annot_box:
+            g = self.pix_geometry()
+            if g:
+                ox, oy, pw, ph = g
+                x0, y0, x1, y1 = self.annot_box
+                r = QRectF(ox + x0 * pw, oy + y0 * ph, max(1.0, (x1 - x0) * pw), max(1.0, (y1 - y0) * ph))
+                p = QPainter(self)
+                p.setPen(QPen(QColor(30, 120, 255), 1, Qt.DashLine))
+                p.setBrush(Qt.NoBrush)
+                p.drawRect(r)
+                if self.annot_handle:
+                    h = HANDLE_PX
+                    p.setPen(QPen(QColor(30, 120, 255), 1.5))
+                    p.setBrush(QColor(255, 255, 255))
+                    p.drawRect(QRectF(r.right() - h / 2, r.bottom() - h / 2, h, h))
                 p.end()
         if self.stamp_mode and self.ghost and self.ghost_pos is not None:
             p = QPainter(self)
@@ -322,8 +421,9 @@ class MainWindow(QMainWindow):
         self.current = -1
         self.stamp_mode = False
         self.note_mode = False
-        self.text_mode = False
-        self.drag_annot: tuple[int, dict, tuple[float, float]] | None = None   # 注釈をドラッグ移動中: (ページ, 注釈, 掴んだ点)
+        fonts.set_cache_file(os.path.join(config_dir(), "fonts.json"))    # フォントの確認結果を覚えておく（2 回目以降のリボン表示を速くする）
+        self.sel_annot: tuple[int, int] | None = None     # 選択中の注釈 (ページ, xref)
+        self._drag: dict | None = None                    # ドラッグ中の操作（描画・移動・大きさ変更）
         self.display_mode = "normal"
         self.auto_toc_panel = True
         self._words_cache: dict[int, list[dict]] = {}
@@ -440,6 +540,18 @@ class MainWindow(QMainWindow):
         tb.setToolTip("右クリックで上下左右の辺に移動できます（左端のドラッグでも可）")
         self.addToolBar(tb)
         self.toolbar = tb
+        # 書き込みリボン（「書き込み」ボタンを押している間だけ、ツールバーの下の段に出す）
+        self.ribbon = WriteRibbon(self)
+        self.ribbon.ask_color = lambda initial, title: self._ask_color(initial, title)
+        self.ribbon.tool_changed.connect(self._on_tool_changed)
+        self.ribbon.style_changed.connect(self._on_style_changed)
+        self.ribbon.markup_requested.connect(self.apply_markup)
+        self.ribbon.close_requested.connect(lambda: self._toggle_write(False))
+        self.ribbon.load_settings(self._settings())
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.addToolBar(Qt.TopToolBarArea, self.ribbon)
+        self.ribbon.toggleViewAction().setVisible(False)    # 右クリックメニューからは出し入れさせない（「書き込み」ボタンと状態を合わせるため）
+        self.ribbon.hide()
         fmenu = self.menuBar().addMenu("ファイル(&F)")
         emenu = self.menuBar().addMenu("編集(&E)")
         vmenu = self.menuBar().addMenu("表示(&V)")
@@ -501,7 +613,7 @@ class MainWindow(QMainWindow):
         a_dock.setCheckable(True); a_dock.setChecked(True)
         self.stamp_dock.visibilityChanged.connect(a_dock.setChecked)
         # メニュー/ツールバーに載せないアクションは、ウィンドウに addAction しないとショートカットが効かない
-        self.addAction(act("キャンセル（押印・付箋・テキスト注釈モード終了）", self._cancel_modes, "Esc", None, toolbar=False))
+        self.addAction(act("キャンセル（押印・付箋・書き込みの終了）", self._cancel_modes, "Esc", None, toolbar=False))
         act("更新を確認...", lambda: self.check_for_update(manual=True), None, hmenu, toolbar=False,
             tip="GitHub Releases に新しいバージョンがあるか調べ、あればダウンロードして更新します")
         self.a_auto_update = act("起動時に更新を確認", self._toggle_auto_update, None, hmenu, toolbar=False,
@@ -522,17 +634,21 @@ class MainWindow(QMainWindow):
         self.a_auto_toc = act("目次のある PDF を開いたら自動でパネルを開く", self._set_auto_toc, None, bmenu, toolbar=False, tip="索引・目次付きの PDF を開いたとき、目次パネルを自動で表示する")
         self.a_auto_toc.setCheckable(True); self.a_auto_toc.setChecked(True)
 
-        # 注釈: 選択した文字へのマーカー、テキスト注釈。既存の注釈は右クリックで編集・削除、ドラッグで移動
-        self.a_highlight = act("蛍光ペン", lambda: self.apply_markup("highlight"), "Ctrl+Shift+H", amenu, icon="format-text-bold",
+        # 書き込み: リボンを出して、ペン・図形・文字・マーカーを使う。書いたものはクリックで選び、移動・大きさ変更・削除ができる
+        self.a_write = act("書き込み", self._toggle_write, "F4", amenu, tip="書き込み用のリボン（ペン・直線・矢印・四角・丸・文字・蛍光ペン）を出す。もう一度押すか Esc で閉じる")
+        self.a_write.setCheckable(True)
+        self.a_write.setIcon(tool_icon("pen"))
+        amenu.addSeparator()
+        self.a_highlight = act("蛍光ペン", lambda: self.apply_markup("highlight"), "Ctrl+Shift+H", amenu, toolbar=False,
                                tip="ドラッグで選択した文字に蛍光ペンを引く（PDF の注釈として保存。右クリックで色変更・削除）")
         self.a_underline = act("下線", lambda: self.apply_markup("underline"), "Ctrl+Shift+U", amenu, toolbar=False,
                                tip="選択した文字に下線を引く")
         self.a_strikeout = act("取り消し線", lambda: self.apply_markup("strikeout"), "Ctrl+Shift+K", amenu, toolbar=False,
                                tip="選択した文字に取り消し線を引く")
         amenu.addSeparator()
-        self.a_text = act("テキスト注釈", self._toggle_text_mode, "F4", amenu, icon="insert-text",
-                          tip="ON にしてページ上をクリックすると、その位置に文字を書き込みます（注釈として保存）。Esc で終了。ドラッグで移動、右クリックで編集・色・サイズ・削除")
-        self.a_text.setCheckable(True)
+        self.a_del_annot = act("選択した書き込みを削除", self.delete_selected_annot, None, amenu, toolbar=False,
+                               tip="クリックで選んだ書き込み（線・図形・文字・マーカー）を削除する。Delete キーでも可")
+        self.a_del_annot.setEnabled(False)
         for a in (self.a_highlight, self.a_underline, self.a_strikeout):
             a.setEnabled(False)
 
@@ -565,9 +681,12 @@ class MainWindow(QMainWindow):
     def _update_actions(self):
         has = self.model.doc is not None and self.model.page_count > 0
         sel = bool(self.thumbs.selectedItems())
-        for a in (self.a_save, self.a_saveas, self.a_insert, self.a_print, self.a_note, self.a_text, self.a_password,
+        for a in (self.a_save, self.a_saveas, self.a_insert, self.a_print, self.a_note, self.a_write, self.a_password,
                   self.a_bookmark, self.btn_bm_add):
             a.setEnabled(has)
+        if not has and self.ribbon.isVisible():
+            self._toggle_write(False)
+        self.a_del_annot.setEnabled(has and self.sel_annot is not None)
         has_toc_sel = has and self.toc_tree.currentItem() is not None
         self.btn_bm_rename.setEnabled(has_toc_sel)
         self.btn_bm_del.setEnabled(has_toc_sel)
@@ -640,6 +759,7 @@ class MainWindow(QMainWindow):
         st = s.value("state")
         if st is not None:
             self.restoreState(st)
+        self.ribbon.hide()      # 書き込みリボンは「書き込み」を押したときだけ出す
         mode = s.value("display_mode", "normal")
         if mode in DISPLAY_MODES:
             self.set_display_mode(mode)
@@ -978,6 +1098,10 @@ class MainWindow(QMainWindow):
             self._update_actions()
 
     def delete_selected(self):
+        if self.sel_annot is not None:
+            # 書き込みを選んでいるときの Delete は、ページではなく書き込みを消す（ページを誤って消さないため）
+            self.delete_selected_annot()
+            return
         sel = self.thumbs.selected_indices()
         if not sel:
             return
@@ -1025,29 +1149,183 @@ class MainWindow(QMainWindow):
         self._set_stamp_mode(on)
 
     def _cancel_modes(self):
+        """Esc: 押印・付箋モードを終える。書き込み中は、まず道具を「選択」に戻し、次の Esc でリボンを閉じる。"""
+        if self._drag is not None:
+            self._abort_drag()
         self._set_stamp_mode(False)
         self._set_note_mode(False)
-        self._set_text_mode(False)
+        had_selection = self.sel_annot is not None or bool(self.selected_text)
         self.clear_selection()
+        self._select_annot(None)
+        if self.ribbon.isVisible():
+            if self.ribbon.tool() != "select":
+                self.ribbon.set_tool("select")
+            elif not had_selection:
+                self._toggle_write(False)
 
-    def _toggle_text_mode(self, on: bool):
-        self._set_text_mode(on)
+    # ------------------------------------------------------------ 書き込みリボン
+    @property
+    def write_tool(self) -> str:
+        """今の道具。リボンを閉じているときは「選択」。"""
+        return self.ribbon.tool() if self.ribbon.isVisible() else "select"
 
-    def _set_text_mode(self, on: bool):
+    @property
+    def text_mode(self) -> bool:
+        return self.write_tool == "text"
+
+    @property
+    def drag_annot(self):
+        """注釈をドラッグで移動している最中なら (ページ, 注釈, 掴んだ点)。"""
+        d = self._drag
+        return (d["index"], d["annot"], d["start"]) if d and d["kind"] == "move" else None
+
+    def _toggle_write(self, on: bool):
         if on and self.model.doc is None:
             self.statusBar().showMessage("先に PDF を開いてください。", 3000)
             on = False
         if on:
             self._set_stamp_mode(False)
             self._set_note_mode(False)
-        self.text_mode = on
-        self.a_text.blockSignals(True); self.a_text.setChecked(on); self.a_text.blockSignals(False)
-        for v in self.views:
-            v.set_text_mode(on)
+            if not self.ribbon._fonts_loaded:
+                QApplication.setOverrideCursor(Qt.WaitCursor)     # PC のフォントを調べるので少し時間がかかる
+                try:
+                    self.ribbon.ensure_fonts()
+                finally:
+                    QApplication.restoreOverrideCursor()
+        self.a_write.blockSignals(True); self.a_write.setChecked(on); self.a_write.blockSignals(False)
+        if not on and self.ribbon.tool() != "select":
+            self.ribbon.blockSignals(True); self.ribbon.set_tool("select"); self.ribbon.blockSignals(False)
+        self.ribbon.setVisible(on)
+        self._apply_tool()
         if on:
-            self.statusBar().showMessage("テキスト注釈モード: ページ上をクリックするとその位置に文字を書き込みます（Esc で終了）")
+            self.statusBar().showMessage("書き込み: 上のリボンで道具を選びます。閉じるには「閉じる」か Esc")
         else:
             self.statusBar().clearMessage()
+        # リボンの出し入れでページの表示幅は変わらないが、高さが変わるので見えている範囲を描き直す
+        QTimer.singleShot(0, self._render_visible)
+
+    def _on_tool_changed(self, tool: str):
+        if self._drag is not None:
+            self._abort_drag()
+        if tool != "select":
+            self.clear_selection()
+            self._select_annot(None)
+        self._apply_tool()
+        self.statusBar().showMessage(TOOL_HINTS.get(tool, ""))
+
+    def _apply_tool(self):
+        """今の道具をすべてのページ表示に反映する（カーソルと、クリック / ドラッグのどちらで受けるか）。"""
+        tool = self.write_tool
+        for v in self.views:
+            v.set_text_mode(tool == "text")
+            v.set_draw_mode(tool in DRAW_TOOLS)
+        self._update_ribbon_context()
+
+    def _update_ribbon_context(self):
+        info = self._selected_info()
+        text = self.write_tool == "text" or (self.write_tool == "select" and info is not None and info["type"] == fitz.PDF_ANNOT_FREE_TEXT)
+        self.ribbon.set_context("text" if text else "shape")
+
+    def _on_style_changed(self, what: str):
+        """リボンの設定が変わった。次に書くものに使うほか、選択中の書き込みがあればそれにも適用する。"""
+        self.ribbon.save_settings(self._settings())
+        info = self._selected_info()
+        if info is None or self.sel_annot is None:
+            return
+        index, xref = self.sel_annot
+        rb = self.ribbon
+        t = info["type"]
+        kw: dict = {}
+        if t == fitz.PDF_ANNOT_FREE_TEXT:
+            if what == "color":
+                kw["color"] = rb.color()
+            elif what == "fontsize":
+                kw["fontsize"] = rb.fontsize()
+            elif info["font"] is not None:          # フォント・背景・枠は、このアプリで書いた文字だけ
+                if what == "font":
+                    kw["font"] = rb.font_key()
+                elif what == "textbg":
+                    kw["fill"] = rb.text_bg()
+                elif what == "border":
+                    kw["border"] = rb.text_border()
+        else:
+            shape = t in (fitz.PDF_ANNOT_SQUARE, fitz.PDF_ANNOT_CIRCLE)
+            if what == "color":
+                kw["color"] = rb.color()
+                if shape and info["fill"] is not None:
+                    kw["fill"] = rb.color()
+            elif what == "width" and t not in (fitz.PDF_ANNOT_TEXT, fitz.PDF_ANNOT_HIGHLIGHT, fitz.PDF_ANNOT_UNDERLINE,
+                                               fitz.PDF_ANNOT_STRIKE_OUT, fitz.PDF_ANNOT_SQUIGGLY):
+                kw["width"] = rb.width()
+            elif what == "opacity":
+                kw["opacity"] = rb.opacity()
+            elif what == "fill" and shape:
+                kw["fill"] = rb.color() if rb.fill_enabled() else None
+        if not kw:
+            return
+        try:
+            xref = self.model.set_annot_style(index, xref, **kw)
+        except Exception as e:
+            self._error(e)
+            return
+        self.sel_annot = (index, xref)
+        self._refresh_page(index)
+
+    # ------------------------------------------------------------ 注釈の選択
+    def _selected_info(self) -> dict | None:
+        if self.sel_annot is None or self.model.doc is None:
+            return None
+        return self.model.annot_info(*self.sel_annot)
+
+    def _select_annot(self, index: int | None, xref: int | None = None, reflect: bool = True):
+        """注釈を選択する（index=None で選択解除）。選択中は枠と、大きさを変えられるものには右下のつまみを出す。"""
+        self.sel_annot = (index, xref) if index is not None and xref is not None else None
+        self._update_annot_box()
+        info = self._selected_info()
+        if info is not None and reflect and self.ribbon.isVisible():
+            self.ribbon.reflect(info)
+        self._update_ribbon_context()
+        if hasattr(self, "a_del_annot"):
+            self.a_del_annot.setEnabled(self.sel_annot is not None)
+
+    def _update_annot_box(self):
+        info = self._selected_info()
+        if info is None:
+            self.sel_annot = None
+        for v in self.views:
+            if info is not None and v.index == self.sel_annot[0]:
+                v.set_annot_box(self._frac_rect(v.index, info["rect"]), handle=info["resizable"])
+            elif v.annot_box is not None:
+                v.set_annot_box(None)
+
+    def _on_handle(self, index: int, pt: tuple[float, float]) -> bool:
+        """pt が、選択中の注釈の右下のつまみの上か。"""
+        info = self._selected_info()
+        if info is None or self.sel_annot[0] != index or not info["resizable"]:
+            return False
+        tol = (HANDLE_PX / 2 + 3) / max(0.01, self._view_scale(index))
+        r = info["rect"]
+        return abs(pt[0] - r.x1) <= tol and abs(pt[1] - r.y1) <= tol
+
+    def delete_selected_annot(self):
+        if self.sel_annot is None:
+            return
+        info = self._selected_info()
+        index, xref = self.sel_annot
+        self.remove_annot(index, xref, info["kind"] if info else "書き込み")
+
+    def _refresh_page(self, index: int):
+        """1 ページだけ描き直す（書き込みのたびに全ページを作り直すと遅いため）。"""
+        if self.model.doc is None or not (0 <= index < self.model.page_count) or index >= len(self.views):
+            return
+        it = self.thumbs.item(index)
+        if it is not None:
+            it.setIcon(QIcon(QPixmap.fromImage(pix_to_qimage(self.model.render(index, max_width=THUMB_W)))))
+        self._words_cache.pop(index, None)
+        self.views[index].rendered_key = None
+        self._render_visible()
+        self._update_annot_box()
+        self._update_actions()
 
     def _toggle_note_mode(self, on: bool):
         self._set_note_mode(on)
@@ -1058,7 +1336,8 @@ class MainWindow(QMainWindow):
             on = False
         if on:
             self._set_stamp_mode(False)
-            self._set_text_mode(False)
+            if self.ribbon.isVisible():
+                self._toggle_write(False)
         self.note_mode = on
         self.a_note.blockSignals(True); self.a_note.setChecked(on); self.a_note.blockSignals(False)
         for v in self.views:
@@ -1071,7 +1350,8 @@ class MainWindow(QMainWindow):
     def _set_stamp_mode(self, on: bool):
         if on:
             self._set_note_mode(False)
-            self._set_text_mode(False)
+            if self.ribbon.isVisible():
+                self._toggle_write(False)
         if on and (self.model.doc is None or self.stamp_dock_widget.current_stamp() is None):
             if self.model.doc is None:
                 self.statusBar().showMessage("先に PDF を開いてください。", 3000)
@@ -1135,7 +1415,13 @@ class MainWindow(QMainWindow):
             return
         if self.text_mode:
             self._set_current(index)
-            self.add_free_text_at(index, self._page_point(index, frac))
+            pt = self._page_point(index, frac)
+            a = self.model.annot_at(index, pt, pad=ANNOT_HIT_PAD)
+            if a is not None and a["type"] == fitz.PDF_ANNOT_FREE_TEXT:
+                self._select_annot(index, a["xref"])       # 書いてある文字をクリックしたら、新しく書かずに直す
+                self.edit_annot_text(index, a)
+            else:
+                self.add_text_at(index, pt)
             return
         if not getattr(self, "stamp_mode", False):
             return
@@ -1185,8 +1471,9 @@ class MainWindow(QMainWindow):
             menu.addSeparator()
         elif annot is not None:
             kind = annot["kind"]
+            self._select_annot(index, annot["xref"])
             if annot["type"] == fitz.PDF_ANNOT_FREE_TEXT:
-                menu.addAction("テキスト注釈を編集...", lambda: self.edit_annot_text(index, annot))
+                menu.addAction("文字を編集...", lambda: self.edit_annot_text(index, annot))
                 menu.addAction("文字サイズを変更...", lambda: self.resize_annot_text(index, annot))
             menu.addAction(f"{kind}の色を変更...", lambda: self.recolor_annot(index, annot["xref"]))
             menu.addAction(f"この{kind}を削除", lambda: self.remove_annot(index, annot["xref"], kind))
@@ -1199,10 +1486,16 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("ここに付箋を追加...", lambda: self.add_note_at(index, pt))
         menu.addAction("このページをしおりに追加...", lambda: self.add_bookmark(index))
-        if self.stamp_mode or self.note_mode or self.text_mode:
+        if self.stamp_mode or self.note_mode or self.ribbon.isVisible():
             menu.addSeparator()
-            menu.addAction("押印・付箋・テキスト注釈モードを終了", self._cancel_modes)
+            menu.addAction("押印・付箋・書き込みを終了", self._end_all_modes)
         self._popup_menu(menu, gpos)
+
+    def _end_all_modes(self):
+        self._set_stamp_mode(False)
+        self._set_note_mode(False)
+        if self.ribbon.isVisible():
+            self._toggle_write(False)
 
     def _annot_hit(self, index: int, pt: tuple[float, float]) -> dict | None:
         """付箋以外の注釈の当たり判定。"""
@@ -1228,14 +1521,19 @@ class MainWindow(QMainWindow):
         note = self._note_hit(index, pt)
         annot = None if note is not None else self._annot_hit(index, pt)
         v = self.views[index]
-        if self.drag_annot is not None:
+        if self._drag is not None:
             return
-        if not v.click_mode:
-            if note is not None or (annot is not None and annot["movable"]):
+        if not v.click_mode and not v.draw_mode:
+            if self._on_handle(index, pt):
+                v.setCursor(Qt.SizeFDiagCursor)
+            elif note is not None or (annot is not None and annot["movable"]):
                 v.setCursor(Qt.SizeAllCursor)
             else:
                 over_text = any(w["rect"].contains(fitz.Point(*pt)) for w in self._words(index))
                 v.setCursor(Qt.IBeamCursor if over_text and annot is None else Qt.ArrowCursor)
+        if v.draw_mode:
+            QToolTip.hideText()
+            return
         if note is None and annot is None:
             QToolTip.hideText()
             return
@@ -1275,12 +1573,29 @@ class MainWindow(QMainWindow):
         self.clear_selection()
         self._set_current(index)
         pt = self._page_point(index, frac)
-        a = self.model.annot_at(index, pt, pad=ANNOT_HIT_PAD)
-        if a is not None and a["movable"]:
-            # 注釈の上から始まるドラッグは移動
-            self.drag_annot = (index, a, pt)
-            self.views[index].set_move_rect(self._frac_rect(index, a["rect"]))
+        tool = self.write_tool
+        if tool in DRAW_TOOLS:
+            # ペン・直線・矢印・四角・丸: ドラッグで描く
+            self._select_annot(None)
+            self._drag = {"kind": tool, "index": index, "pts": [pt]}
             return
+        if self._on_handle(index, pt):
+            # 選択中の注釈の右下のつまみ: 大きさ変更
+            info = self._selected_info()
+            self._drag = {"kind": "resize", "index": index, "annot": info, "start": pt}
+            self.views[index].set_move_rect(self._frac_rect(index, info["rect"]))
+            return
+        a = self.model.annot_at(index, pt, pad=ANNOT_HIT_PAD)
+        if a is not None:
+            self._select_annot(index, a["xref"])
+            if a["movable"]:
+                # 注釈の上から始まるドラッグは移動
+                self._drag = {"kind": "move", "index": index, "annot": a, "start": pt}
+                self.views[index].set_move_rect(self._frac_rect(index, a["rect"]))
+                return
+        else:
+            self._select_annot(None)
+        # それ以外（余白・本文・マーカーの上）は文字の選択
         self.sel_page = index
         self.sel_anchor = pt
 
@@ -1288,37 +1603,84 @@ class MainWindow(QMainWindow):
         pr = self.model.doc[index].rect
         return rect.x0 / pr.width, rect.y0 / pr.height, rect.x1 / pr.width, rect.y1 / pr.height
 
+    def _resized_rect(self, d: dict, pt: tuple[float, float]) -> fitz.Rect:
+        r = fitz.Rect(d["annot"]["rect"])
+        dx, dy = pt[0] - d["start"][0], pt[1] - d["start"][1]
+        return fitz.Rect(r.x0, r.y0, max(r.x0 + 6, r.x1 + dx), max(r.y0 + 6, r.y1 + dy))
+
+    def _preview_for(self, d: dict) -> dict:
+        index = d["index"]
+        pr = self.model.doc[index].rect
+        rb = self.ribbon
+        kind = d["kind"]
+        pts = d["pts"] if kind == "pen" else [d["pts"][0], d["pts"][-1]]
+        return {"kind": kind, "pts": [(x / pr.width, y / pr.height) for x, y in pts],
+                "color": QColor.fromRgbF(*rb.color()), "width": rb.width() * self._view_scale(index),
+                "opacity": rb.opacity(), "fill": kind in ("rect", "ellipse") and rb.fill_enabled()}
+
+    def _abort_drag(self):
+        d, self._drag = self._drag, None
+        if d and d["index"] < len(self.views):
+            self.views[d["index"]].set_move_rect(None)
+            self.views[d["index"]].set_preview(None)
+
     def _on_drag_moved(self, index: int, frac: QPointF):
-        if self.drag_annot is not None:
-            i, a, start = self.drag_annot
-            if index != i:
+        d = self._drag
+        if d is not None:
+            if index != d["index"]:
                 return
             pt = self._page_point(index, frac)
-            r = fitz.Rect(a["rect"]) + (pt[0] - start[0], pt[1] - start[1], pt[0] - start[0], pt[1] - start[1])
-            self.views[i].set_move_rect(self._frac_rect(i, r))
+            v = self.views[index]
+            if d["kind"] == "move":
+                start = d["start"]
+                r = fitz.Rect(d["annot"]["rect"]) + (pt[0] - start[0], pt[1] - start[1], pt[0] - start[0], pt[1] - start[1])
+                v.set_move_rect(self._frac_rect(index, r))
+            elif d["kind"] == "resize":
+                v.set_move_rect(self._frac_rect(index, self._resized_rect(d, pt)))
+            else:
+                last = d["pts"][-1]
+                if d["kind"] != "pen" or abs(pt[0] - last[0]) + abs(pt[1] - last[1]) >= 0.8:
+                    d["pts"].append(pt)
+                v.set_preview(self._preview_for(d))
             return
         if self.sel_page is None or index != self.sel_page or self.sel_anchor is None:
             return
         self._update_selection(self._page_point(index, frac))
 
     def _on_drag_finished(self, index: int, frac: QPointF):
-        if self.drag_annot is not None:
-            i, a, start = self.drag_annot
-            self.drag_annot = None
-            self.views[i].set_move_rect(None)
+        d = self._drag
+        if d is not None:
+            self._abort_drag()
+            i = d["index"]
             if index != i:
                 return
             pt = self._page_point(index, frac)
-            dx, dy = pt[0] - start[0], pt[1] - start[1]
-            if abs(dx) < 0.5 and abs(dy) < 0.5:
-                return
             try:
-                self.model.move_annot(i, a["xref"], dx, dy)
+                if d["kind"] == "move":
+                    a, start = d["annot"], d["start"]
+                    dx, dy = pt[0] - start[0], pt[1] - start[1]
+                    if abs(dx) < 0.5 and abs(dy) < 0.5:
+                        return                      # クリックだけ（選択のみ）
+                    xref = self.model.move_annot(i, a["xref"], dx, dy)
+                    self.sel_annot = (i, xref)
+                    msg = f"{a['kind']}を移動しました。Ctrl+Z で戻せます"
+                elif d["kind"] == "resize":
+                    a = d["annot"]
+                    new = self._resized_rect(d, pt)
+                    if abs(new.x1 - a["rect"].x1) < 0.5 and abs(new.y1 - a["rect"].y1) < 0.5:
+                        return
+                    xref = self.model.resize_annot(i, a["xref"], new)
+                    self.sel_annot = (i, xref)
+                    msg = f"{a['kind']}の大きさを変えました。Ctrl+Z で戻せます"
+                else:
+                    msg = self._finish_drawing(d, pt)
+                    if msg is None:
+                        return
             except Exception as e:
                 self._error(e)
                 return
-            self.refresh_thumbs(select=[i], keep_view=True)
-            self.statusBar().showMessage(f"{a['kind']}を移動しました。Ctrl+Z で戻せます", 4000)
+            self._refresh_page(i)
+            self.statusBar().showMessage(msg, 4000)
             return
         if self.sel_page is None or index != self.sel_page:
             return
@@ -1326,6 +1688,45 @@ class MainWindow(QMainWindow):
         if self.selected_text:
             n = len(self.selected_text)
             self.statusBar().showMessage(f"{n} 文字を選択中。Ctrl+C でコピー、右クリックでも可", 4000)
+
+    def _finish_drawing(self, d: dict, pt: tuple[float, float]) -> str | None:
+        """ドラッグで描いた線・図形を注釈として書き込む。短すぎて何も書かなかったら None。"""
+        rb = self.ribbon
+        i, kind, pts = d["index"], d["kind"], d["pts"]
+        color, width, opacity = rb.color(), rb.width(), rb.opacity()
+        a, b = pts[0], pt
+        if kind == "pen":
+            if pts[-1] != pt:
+                pts.append(pt)
+            if len(pts) < 2 or max(abs(p[0] - a[0]) + abs(p[1] - a[1]) for p in pts) < 1.5:
+                return None
+            self.model.add_ink(i, [pts], color, width, opacity)
+            return "線を書きました。続けて書けます。Ctrl+Z で取り消し"
+        if abs(b[0] - a[0]) + abs(b[1] - a[1]) < 4:
+            return None
+        if kind in ("line", "arrow"):
+            self.model.add_line(i, a, b, color, width, opacity, arrow=kind == "arrow")
+            return ("矢印" if kind == "arrow" else "直線") + "を引きました。Ctrl+Z で取り消し"
+        if abs(b[0] - a[0]) < 3 or abs(b[1] - a[1]) < 3:
+            return None
+        self.model.add_shape(i, kind, (a[0], a[1], b[0], b[1]), color, width, opacity, fill=color if rb.fill_enabled() else None)
+        return ("四角" if kind == "rect" else "丸") + "を書きました。Ctrl+Z で取り消し"
+
+    def _on_page_double_clicked(self, index: int, frac: QPointF):
+        """書いた文字・付箋をダブルクリックしたら内容を直す。"""
+        if self.model.doc is None or not (0 <= index < self.model.page_count) or self.write_tool != "select":
+            return
+        if self._drag is not None:
+            self._abort_drag()
+        pt = self._page_point(index, frac)
+        note = self._note_hit(index, pt)
+        if note is not None:
+            self.edit_note(index, note)
+            return
+        a = self._annot_hit(index, pt)
+        if a is not None and a["type"] == fitz.PDF_ANNOT_FREE_TEXT:
+            self._select_annot(index, a["xref"])
+            self.edit_annot_text(index, a)
 
     def _update_selection(self, pt: tuple[float, float]):
         index = self.sel_page
@@ -1352,6 +1753,7 @@ class MainWindow(QMainWindow):
     def _set_selection_actions(self, on: bool):
         for a in (self.a_copy, self.a_highlight, self.a_underline, self.a_strikeout):
             a.setEnabled(on)
+        self.ribbon.set_markup_enabled(on)
 
     @staticmethod
     def _join_words(words: list[dict]) -> str:
@@ -1399,7 +1801,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        self._refresh_page(index)
         self.statusBar().showMessage(f"付箋を追加しました（ページ {index + 1}）。右クリックで編集・削除、Ctrl+Z で取り消し", 5000)
 
     def edit_note(self, index: int, note: dict):
@@ -1411,7 +1813,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        self._refresh_page(index)
 
     def remove_note(self, index: int, xref: int):
         try:
@@ -1419,10 +1821,10 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        self._refresh_page(index)
         self.statusBar().showMessage(f"付箋を削除しました（ページ {index + 1}）。Ctrl+Z で戻せます", 5000)
 
-    # ------------------------------------------------------------ 注釈（マーカー・テキスト注釈・既存注釈の編集）
+    # ------------------------------------------------------------ 書き込み（マーカー・文字・既存注釈の編集）
     def _ask_color(self, initial: QColor, title: str) -> QColor | None:
         """色の選択（テストではここを差し替える）。キャンセルなら None。"""
         c = QColorDialog.getColor(initial, self, title)
@@ -1442,32 +1844,42 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        self.clear_selection()
+        self._refresh_page(index)
         self.statusBar().showMessage(f"{label}を付けました（ページ {index + 1}）。右クリックで色変更・削除、Ctrl+Z で取り消し", 5000)
 
-    def add_free_text_at(self, index: int, pt: tuple[float, float]):
-        text = self._ask_text("テキスト注釈", f"ページ {index + 1} に書き込む文字:")
+    def add_text_at(self, index: int, pt: tuple[float, float]):
+        """リボンで選んだフォント・大きさ・色で、pt を左上として文字を書き込む。"""
+        text = self._ask_text("文字を書き込む", f"ページ {index + 1} に書き込む文字:")
         if text is None or not text.strip():
             return
-        size = self._settings().value("annot/fontsize", 12.0, type=float)
+        rb = self.ribbon
         try:
-            self.model.add_free_text(index, pt, text.strip("\n"), fontsize=size)
+            xref = self.model.add_text_box(index, pt, text.strip("\n"), font=rb.font_key(), fontsize=rb.fontsize(),
+                                           color=rb.color(), fill=rb.text_bg(), border=rb.text_border(),
+                                           title=os.environ.get("USERNAME") or os.environ.get("USER") or "")
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
-        self.statusBar().showMessage(f"テキスト注釈を追加しました（ページ {index + 1}）。ドラッグで移動、右クリックで編集・色・サイズ・削除", 5000)
+        self.sel_annot = (index, xref)
+        self._refresh_page(index)
+        self.statusBar().showMessage(f"文字を書き込みました（ページ {index + 1}）。クリックで直す、ドラッグで移動、Ctrl+Z で取り消し", 5000)
 
     def edit_annot_text(self, index: int, annot: dict):
-        text = self._ask_text("テキスト注釈を編集", "文字:", annot["text"])
+        text = self._ask_text("文字を編集", "文字:", annot["text"])
         if text is None:
             return
         try:
-            self.model.set_annot_text(index, annot["xref"], text.strip("\n"))
+            if not text.strip():
+                self.model.remove_annot(index, annot["xref"])       # 空にしたら消す
+                xref = None
+            else:
+                xref = self.model.set_annot_text(index, annot["xref"], text.strip("\n"))
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        self.sel_annot = (index, xref) if xref is not None else None
+        self._refresh_page(index)
 
     def resize_annot_text(self, index: int, annot: dict):
         cur = annot.get("fontsize") or 12.0
@@ -1478,15 +1890,15 @@ class MainWindow(QMainWindow):
             size = float(val)
             if not (4 <= size <= 200):
                 raise ValueError("文字サイズは 4〜200 の範囲で指定してください。")
-            self.model.set_annot_fontsize(index, annot["xref"], size)
-            self._settings().setValue("annot/fontsize", size)
+            xref = self.model.set_annot_fontsize(index, annot["xref"], size)
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        self.sel_annot = (index, xref)
+        self._refresh_page(index)
 
     def recolor_annot(self, index: int, xref: int):
-        cur = next((a for a in self.model.annots_on_page(index) if a["xref"] == xref), None)
+        cur = self.model.annot_info(index, xref)
         if cur is None:
             return
         init = QColor.fromRgbF(*cur["stroke"]) if cur["stroke"] else QColor(255, 0, 0)
@@ -1494,11 +1906,13 @@ class MainWindow(QMainWindow):
         if c is None:
             return
         try:
-            self.model.set_annot_color(index, xref, (c.redF(), c.greenF(), c.blueF()))
+            new = self.model.set_annot_color(index, xref, (c.redF(), c.greenF(), c.blueF()))
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        if self.sel_annot == (index, xref):
+            self.sel_annot = (index, new)
+        self._refresh_page(index)
 
     def remove_annot(self, index: int, xref: int, kind: str = "注釈"):
         try:
@@ -1506,7 +1920,9 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self._error(e)
             return
-        self.refresh_thumbs(select=[index], keep_view=True)
+        if self.sel_annot == (index, xref):
+            self.sel_annot = None
+        self._refresh_page(index)
         self.statusBar().showMessage(f"{kind}を削除しました（ページ {index + 1}）。Ctrl+Z で戻せます", 5000)
 
     # ------------------------------------------------------------ 目次・しおり
@@ -1656,6 +2072,9 @@ class MainWindow(QMainWindow):
         elif self.current >= 0:
             self._scroll_to_page(self.current)
         self._render_visible()
+        self._drag = None
+        self._update_annot_box()
+        self.a_del_annot.setEnabled(self.sel_annot is not None)
         if getattr(self, "stamp_mode", False):
             self._refresh_ghost()
 
@@ -1671,6 +2090,9 @@ class MainWindow(QMainWindow):
             v = PageView(i)
             v.set_background(DISPLAY_MODES[self.display_mode][1])
             v.set_note_mode(self.note_mode)
+            v.set_text_mode(self.write_tool == "text")
+            v.set_draw_mode(self.write_tool in DRAW_TOOLS)
+            v.double_clicked.connect(self._on_page_double_clicked)
             v.clicked.connect(self._on_page_clicked)
             v.context_requested.connect(self._on_page_context)
             v.hovered.connect(self._on_page_hovered)
@@ -1893,6 +2315,11 @@ class MainWindow(QMainWindow):
 
 
 def main():
+    if "--selftest" in sys.argv:
+        # 配布用 exe の自己診断（CI 用）。画面を出さずに書き込み機能を試し、結果をファイルに書いて終了する
+        import selftest
+        i = sys.argv.index("--selftest")
+        sys.exit(selftest.run(sys.argv[i + 1] if len(sys.argv) > i + 1 else None))
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(__version__)

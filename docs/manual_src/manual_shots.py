@@ -5,8 +5,14 @@ TMP = tempfile.mkdtemp(prefix="pdfpe_manual_")
 os.environ["APPDATA"] = os.path.join(TMP, "appdata")
 os.environ["XDG_CONFIG_HOME"] = os.path.join(TMP, "xdg")
 os.environ["USERNAME"] = "山田"
+# 書き込み用フォント: Linux にはメイリオが無いので、内蔵フォントを「メイリオ」の名前で置いて一覧に出す（Windows の画面に合わせるため）
+_FONTS = os.path.join(TMP, "fonts"); os.makedirs(_FONTS)
+os.environ.setdefault("PDFPE_FONT_DIRS", _FONTS)
+os.environ.setdefault("PDFPE_FONT_DIRS_ONLY", "1")
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 import pymupdf as fitz
+if os.environ["PDFPE_FONT_DIRS"] == _FONTS:
+    open(os.path.join(_FONTS, "meiryo.ttc"), "wb").write(fitz.Font("japan").buffer)
 from PySide6.QtCore import QPoint, QPointF, QSettings, Qt, QRect
 from PySide6.QtGui import QPixmap, QPainter, QColor, QPen, QFont, QGuiApplication
 from PySide6.QtTest import QTest
@@ -201,20 +207,58 @@ draw_callouts(pm, [(mp.x() + 6 + captured["menu"].width() + 24, mp.y() + 6 + 14,
 crop = QRect(max(0, mp.x() - 320), max(0, mp.y() - 160), 760, 420)
 pm.copy(crop).save(os.path.join(OUT, "06_stamp_cancel.png")); print("shot 06")
 
-# 7. 付箋とマーカー、テキスト注釈（1 ページ目）
+# 7. 書き込み（1 ページ目）: リボン、ペン・矢印・四角・丸・文字、付箋、蛍光ペン
+win.stamp_dock.hide(); win.toc_dock.hide(); QTest.qWait(300)      # ページを大きく見せる
 win.goto(0); QTest.qWait(200)
-win.model.add_note(0, (470, 540), "第5条の期間を確認してください。", title="山田")
+win.a_write.trigger(); QTest.qWait(400)
+win.zoom_fit(); QTest.qWait(400)
+rb = win.ribbon
+win.model.add_note(0, (470, 548), "第5条の期間を確認してください。", title="山田")
 words = win.model.page_words(0)
 sec5 = [w for w in words if "第5条" in w["text"]]
 if sec5:
     win.model.add_markup(0, "highlight", [sec5[0]["rect"]])
-win.model.add_free_text(0, (380, 660), "確認済み　2026/11/06", fontsize=14)
-win.refresh_thumbs(select=[0], keep_view=True); QTest.qWait(300)
+win.model.add_ink(0, [[(300, 468), (318, 482), (336, 464), (354, 482), (372, 466), (392, 480)]], (0.85, 0.1, 0.1), 2.0, 1.0)
+win.model.add_line(0, (430, 400), (330, 436), (0.1, 0.3, 0.85), 2.0, 1.0, arrow=True)
+win.model.add_shape(0, "rect", (66, 426, 420, 446), (0.85, 0.1, 0.1), 2.0, 1.0)
+win.model.add_shape(0, "ellipse", (150, 484, 262, 506), (0.0, 0.55, 0.2), 2.0, 1.0)
+tx = win.model.add_text_box(0, (360, 640), "確認済み　山田\n2026/11/13", font=rb.cb_font.itemData(rb.cb_font.count() - 1), fontsize=14,
+                            color=(0.85, 0.1, 0.1), fill=(1.0, 1.0, 0.8), border=True)
+win._refresh_page(0); QTest.qWait(300)
+# 書き込んだあたり（ページの中ほど）が見えるようにスクロールする
+win.scroll.verticalScrollBar().setValue(int(win._page_top(0) + 370 * win._view_scale(0))); QTest.qWait(400)
 v = win.view; ox, oy, pw, ph = v.pix_geometry(); pr = win.model.doc[0].rect
 def pt_of(x, y):
     q = v.mapTo(win, QPoint(int(ox + x * pw / pr.width), int(oy + y * ph / pr.height))); return q.x(), q.y()
-n = pt_of(470, 540); h = pt_of(100, 530); t = pt_of(380, 660)
-shot(win, "07_annots.png", callouts=[(h[0] - 30, h[1], 1), (n[0] + 30, n[1], 2), (t[0] - 30, t[1] + 8, 3), (*tb_center(win, win.a_note), 4), (*tb_center(win, win.a_highlight), 5), (*tb_center(win, win.a_text), 6)])
+def rb_center(action):
+    w = rb.widgetForAction(action); c = w.mapTo(win, QPoint(w.width() // 2, w.height())); return c.x(), c.y() + 12
+def rb_widget(w):
+    c = w.mapTo(win, QPoint(w.width() // 2, w.height())); return c.x(), c.y() + 14
+wr = win.toolbar.widgetForAction(win.a_write); wtl = wr.mapTo(win, QPoint(0, 0))
+shot(win, "07_write.png",
+     callouts=[(*rb_center(rb.tool_actions["line"]), 1), (*rb_center(rb.markup_actions["underline"]), 2), (*rb_widget(rb.color_buttons[2]), 3),
+               (*rb_widget(rb.cb_width), 4), (*rb_center(rb.a_close), 5)],
+     rects=[QRect(wtl.x() - 2, wtl.y() - 2, wr.width() + 4, wr.height() + 4)])
+# 7b. リボンの拡大（線の設定）
+rtl = rb.mapTo(win, QPoint(0, 0))
+shot(win, "07b_ribbon_shape.png", crop=QRect(0, rtl.y() - 2, win.width(), rb.height() + 4))
+# 7c. リボンの拡大（文字の設定）
+rb.tool_actions["text"].trigger(); QTest.qWait(200)
+rb.sp_size.setValue(14); rb.cb_bg.setCurrentIndex(2); rb.chk_border.setChecked(True); rb.cb_font.setCurrentIndex(rb.cb_font.count() - 1); QTest.qWait(150)
+shot(win, "07c_ribbon_text.png", callouts=[(*rb_widget(rb.cb_font), 1), (*rb_widget(rb.sp_size), 2), (*rb_widget(rb.cb_bg), 3)],
+     crop=QRect(0, rtl.y() - 2, win.width(), rb.height() + 34))
+# 7d. 選択したところ（枠と右下のつまみ）
+rb.tool_actions["select"].trigger(); QTest.qWait(150)
+sq = [a for a in win.model.annots_on_page(0) if a["kind"] == "円"][0]
+win._select_annot(0, sq["xref"]); QTest.qWait(200)
+c0 = pt_of(sq["rect"].x0, sq["rect"].y0); c1 = pt_of(sq["rect"].x1, sq["rect"].y1)
+shot(win, "07d_selected.png", callouts=[(c1[0] + 26, c1[1] + 4, 1)],
+     crop=QRect(max(0, c0[0] - 180), max(0, c0[1] - 110), 700, 260))
+win._select_annot(None)
+# 7e. 付箋と蛍光ペン
+n = pt_of(470, 548); h = pt_of(100, 530)
+shot(win, "07_annots.png", callouts=[(h[0] - 30, h[1], 1), (n[0] + 30, n[1], 2), (tb_center(win, win.a_note)[0], tb_center(win, win.a_note)[1], 3)])
+win.a_write.trigger(); QTest.qWait(300)
 
 # 8. 表示モード（暖色）
 win.set_display_mode("warm"); QTest.qWait(300)
