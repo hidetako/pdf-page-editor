@@ -71,6 +71,7 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 - ローカル: `build_windows.bat` をダブルクリック。`dist\PdfPageEditor.exe` ができ、Inno Setup 6 が入っていれば `dist\PdfPageEditor-Setup-x.y.z.exe` も作られる
 - GitHub Actions: `app.py` の `__version__` を上げて `main` にマージすると、`.github/workflows/release.yml` が Linux で全テスト（E2E 含む）を実行し、Windows でビルドして、タグ `vX.Y.Z` を打って Releases に公開する（同じバージョンのタグがすでにあればビルドのみ）
 - PyMuPDF 2.x は起動時にレイアウト解析モデルを読み込もうとするため、そのまま PyInstaller にかけると `layout_rf*.yaml` が見つからず起動に失敗する。本アプリでは不要なので `--exclude-module pymupdf.layout` 等で除外している（bat と workflow に設定済み。同梱したい場合は代わりに `--collect-data pymupdf` を付ける）
+- pyinstaller-hooks-contrib 2026.10 以降は、標準のフックが PyMuPDF の付属データ（レイアウト解析用の ONNX モデルなど約 43 MB）をすべて同梱する。本アプリは使わないので、`hooks/hook-pymupdf.py`（何も同梱しないフック）を `--additional-hooks-dir hooks` で渡して置き換えている。これが無いと exe が約 116 MB になる（ある場合は約 73 MB）
 
 
 ## 構成
@@ -79,6 +80,7 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 - `stamp_ui.py` : 印鑑パネルと印鑑編集ダイアログ
 - `fonts.py`    : 書き込み用フォントの検出と、埋め込みフォントでの文字の描画（Qt 非依存）
 - `write_ui.py` : 書き込みリボン（道具・色・太さ・フォントなど）
+- `hooks/hook-pymupdf.py` : PyInstaller 用。PyMuPDF の不要な付属データを exe に入れないためのフック
 - `selftest.py` : 配布用 exe の自己診断（`PdfPageEditor.exe --selftest 記録ファイル`。CI がビルド後に実行し、失敗したら公開しない）
 - `app.py`      : PySide6 GUI 本体
 - `installer/PdfPageEditor.iss` : Inno Setup のインストーラー定義

@@ -107,8 +107,17 @@ jobs:
           echo "version: $v  publish: $publish"
 
       - name: Build exe (PyInstaller)
-        # PyMuPDF 2.x のレイアウト解析モデルは不要なので除外（同梱すると起動時に layout_rf*.yaml を探して失敗する）
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
+        # PyMuPDF 2.x のレイアウト解析モデルは不要なので除外（同梱すると起動時に layout_rf*.yaml を探して失敗する）。
+        # hooks/hook-pymupdf.py は、PyMuPDF の付属データ（ONNX モデルなど約 43 MB）を同梱させないための置き換えフック
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" --additional-hooks-dir hooks --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
+
+      - name: Check exe size
+        # 依存パッケージの更新で、気付かないうちに配布サイズが膨らむことがある（1.5.0 で 73 MB → 116 MB になった）。公開は止めず、警告だけ出す
+        shell: pwsh
+        run: |
+          $mb = [math]::Round((Get-Item dist\PdfPageEditor.exe).Length / 1MB, 1)
+          Write-Host "PdfPageEditor.exe: $mb MB"
+          if ($mb -gt 95) { Write-Host "::warning::PdfPageEditor.exe is $mb MB (expected about 73 MB). A dependency may be bundling extra data." }
 
       - name: Self-test the packaged exe
         # まとめた exe の中でも書き込み機能（埋め込みフォントの文字など）が動くか確かめる。失敗したら公開しない
