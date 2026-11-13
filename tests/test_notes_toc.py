@@ -87,18 +87,19 @@ def main():
         pass
     ft = m.add_free_text(0, (300, 100), "日本語の\nメモ", fontsize=14)
     a = m.annot_at(0, (305, 105))
-    assert a["xref"] == ft and a["kind"] == "テキスト注釈" and a["fontsize"] == 14.0 and a["movable"] and a["text"] == "日本語の\nメモ", a
+    assert a["xref"] == ft and a["kind"] == "文字" and a["fontsize"] == 14.0 and a["movable"] and a["text"] == "日本語の\nメモ", a
     assert a["rect"].x0 == 300 and a["rect"].y0 == 100 and a["rect"].height > 14 * 2, a["rect"]
-    m.move_annot(0, ft, 50, 20)
+    # 文字の書き込みは、動かしたり直したりすると作り直すので、注釈の番号 (xref) は戻り値で受け取る
+    ft = m.move_annot(0, ft, 50, 20)
     assert m.annot_at(0, (355, 125))["xref"] == ft and m.annot_at(0, (305, 105)) is None
-    m.set_annot_text(0, ft, "変更後"); m.set_annot_color(0, ft, (0, 0, 1)); m.set_annot_fontsize(0, ft, 20)
+    ft = m.set_annot_text(0, ft, "変更後"); ft = m.set_annot_color(0, ft, (0, 0, 1)); ft = m.set_annot_fontsize(0, ft, 20)
     a = [z for z in m.annots_on_page(0) if z["xref"] == ft][0]
     assert a["text"] == "変更後" and a["stroke"] == (0.0, 0.0, 1.0) and a["fontsize"] == 20.0 and a["rect"].x0 == 350 and a["rect"].y0 == 120, a
     m.set_annot_color(0, hl, (0, 1, 0)); assert m.annots_on_page(0)[0]["stroke"] == (0.0, 1.0, 0.0)
     pix = m.render(0, 1.0); r = a["rect"]
     blues = sum(1 for yy in range(int(r.y0), int(r.y1)) for xx in range(int(r.x0), int(r.x1)) if pix.pixel(xx, yy)[2] > 150 and pix.pixel(xx, yy)[0] < 100)
-    assert blues > 20, "テキスト注釈が描画される"
-    m.remove_annot(0, so); assert [z["kind"] for z in m.annots_on_page(0)] == ["蛍光ペン", "下線", "テキスト注釈"]
+    assert blues > 20, "書き込んだ文字が描画される"
+    m.remove_annot(0, so); assert [z["kind"] for z in m.annots_on_page(0)] == ["蛍光ペン", "下線", "文字"]
     m.undo(); assert len(m.annots_on_page(0)) == 4
     m.undo(); m.undo(); assert m.annots_on_page(0)[-1]["fontsize"] == 14.0, "文字サイズ変更を Undo"
     out = os.path.join(_TMP, "annots.pdf"); m.save(out); m.close()
@@ -107,7 +108,7 @@ def main():
     m = PdfModel(); m.open(out)
     a = m.annots_on_page(0)
     assert a[3]["text"] == "変更後" and a[3]["stroke"] == (0.0, 0.0, 1.0) and a[0]["stroke"] == (1.0, 1.0, 0.0), a
-    m.set_annot_text(0, a[3]["xref"], "再編集"); m.move_annot(0, a[3]["xref"], -10, -10)
+    x = m.set_annot_text(0, a[3]["xref"], "再編集"); m.move_annot(0, x, -10, -10)
     assert m.annots_on_page(0)[3]["text"] == "再編集"
     # 回転を戻しても注釈の表示位置は追従する（ページ座標は不変）
     r_before = m.annots_on_page(0)[3]["rect"]

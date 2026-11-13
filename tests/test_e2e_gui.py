@@ -16,6 +16,10 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 _TMP = tempfile.mkdtemp(prefix="pdfpe_e2e_")
 os.environ["APPDATA"] = os.path.join(_TMP, "appdata")  # 印鑑ライブラリを隔離
 os.environ["XDG_CONFIG_HOME"] = os.path.join(_TMP, "xdg")  # QSettings (Linux) を隔離
+_FONTS = os.path.join(_TMP, "fonts")                     # 書き込み用フォントを隔離（偽の「メイリオ」を置く）
+os.makedirs(_FONTS)
+os.environ["PDFPE_FONT_DIRS"] = _FONTS
+os.environ["PDFPE_FONT_DIRS_ONLY"] = "1"                 # 実機のフォントは使わない
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import numpy as np
@@ -89,8 +93,15 @@ def thumb_center(win, row):
     return r.center()
 
 
+def near(a, b, tol=0.02):
+    """色などの数値の組が、ほぼ等しいか。"""
+    return a is not None and b is not None and len(a) == len(b) and all(abs(x - y) <= tol for x, y in zip(a, b))
+
+
 def main():
     app = QApplication.instance() or QApplication(sys.argv)
+    with open(os.path.join(_FONTS, "meiryo.ttc"), "wb") as f:      # 中身は内蔵の TrueType フォント
+        f.write(fitz.Font("japan").buffer)
     a = os.path.join(_TMP, "a.pdf"); make_pdf(a, 5, "A")
     b = os.path.join(_TMP, "b.pdf"); make_pdf(b, 2, "B")
     img = os.path.join(_TMP, "img.png")
@@ -815,7 +826,7 @@ def main():
     QTest.keyClick(w8, Qt.Key_Escape); wait()
     w8.model.modified = False; assert w8.close()
 
-    step("注釈: 選択文字に蛍光ペン / 下線 / 取り消し線、F4 でテキスト注釈、ドラッグ移動、右クリックで編集・色・サイズ・削除、Undo、保存")
+    step("注釈: 選択文字に蛍光ペン / 下線 / 取り消し線、F4 → 文字の書き込み、ドラッグ移動、右クリックで編集・色・サイズ・削除、Undo、保存")
     w9 = MainWindow(); w9.resize(1400, 900); w9.show(); wait(50)
     w9.open_file(sel_pdf); wait(150)
     words = w9.model.page_words(0)
@@ -862,7 +873,7 @@ def main():
     w9._ask_color = lambda initial, title: QColor(0, 255, 0)
     w9._popup_menu = pick9("蛍光ペンの色を変更...")
     QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_hl, w9.view.mapToGlobal(on_hl))); wait(100)
-    assert "この蛍光ペンを削除" in picks[-1] and "テキスト注釈を編集..." not in picks[-1], picks[-1]
+    assert "この蛍光ペンを削除" in picks[-1] and "文字を編集..." not in picks[-1], picks[-1]
     assert w9.model.annots_on_page(0)[0]["stroke"] == (0.0, 1.0, 0.0)
     mouse_move(w9.view, on_hl); wait(100)
     assert QToolTip.text().startswith("蛍光ペン") and w9.view.cursor().shape() != Qt.SizeAllCursor, QToolTip.text()
@@ -870,18 +881,22 @@ def main():
     QTest.mousePress(w9.view, Qt.LeftButton, Qt.NoModifier, on_hl); mouse_move(w9.view, QPoint(on_hl.x() + 60, on_hl.y() + 60), Qt.LeftButton); QTest.mouseRelease(w9.view, Qt.LeftButton, Qt.NoModifier, QPoint(on_hl.x() + 60, on_hl.y() + 60)); wait(100)
     assert w9.model.annots_on_page(0)[0]["rect"] == hl["rect"]
     QTest.keyClick(w9, Qt.Key_Escape); wait()
-    # F4 → クリックでテキスト注釈（日本語）
+    # F4 → 書き込みリボン → 「文字」の道具 → クリックで文字を書き込む（日本語）
     w9._ask_text = lambda title, label, default="": "確認済み\n田中"
-    QTest.keyClick(w9, Qt.Key_F4); wait()
-    assert w9.text_mode and w9.a_text.isChecked() and w9.view.text_mode and w9.view.cursor().shape() == Qt.CrossCursor
+    QTest.keyClick(w9, Qt.Key_F4); wait(200)
+    assert w9.ribbon.isVisible() and w9.a_write.isChecked() and w9.write_tool == "select" and not w9.text_mode
+    w9.ribbon.tool_actions["text"].trigger(); wait()
+    assert w9.text_mode and w9.view.text_mode and w9.view.cursor().shape() == Qt.CrossCursor
     at = QPoint(int(ox + pw * 0.55), int(oy + ph * 0.5))
     QTest.mouseClick(w9.view, Qt.LeftButton, Qt.NoModifier, at); wait(150)
-    ft = [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"]
+    ft = [a for a in w9.model.annots_on_page(0) if a["kind"] == "文字"]
     assert len(ft) == 1 and ft[0]["text"] == "確認済み\n田中" and ft[0]["movable"] and ft[0]["fontsize"] == 12.0, ft
     assert abs(ft[0]["rect"].x0 - pr.width * 0.55) < 3 and abs(ft[0]["rect"].y0 - pr.height * 0.5) < 3
-    assert w9.text_mode, "連続して置けるようモードは継続"
+    assert w9.text_mode and w9.view.text_mode, "連続して置けるよう道具は継続"
     QTest.keyClick(w9, Qt.Key_Escape); wait()
-    assert not w9.text_mode and not w9.a_text.isChecked() and w9.view.cursor().shape() == Qt.ArrowCursor
+    assert not w9.text_mode and w9.ribbon.isVisible() and w9.view.cursor().shape() == Qt.ArrowCursor, "1 回目の Esc は道具を選択に戻す"
+    QTest.keyClick(w9, Qt.Key_Escape); wait()
+    assert not w9.ribbon.isVisible() and not w9.a_write.isChecked(), "2 回目の Esc でリボンを閉じる"
     # 描画されている（注釈の位置に赤っぽい画素）
     pix = w9.model.render(0, 1.0); r = ft[0]["rect"]
     reds = 0
@@ -894,14 +909,14 @@ def main():
     # ホバー: ツールチップと移動カーソル。ドラッグで移動
     on_ft = to_widget9(ft[0]["rect"], 0.3, 0.5)
     mouse_move(w9.view, on_ft); wait(100)
-    assert "テキスト注釈: 確認済み" in QToolTip.text() and "移動" in QToolTip.text() and w9.view.cursor().shape() == Qt.SizeAllCursor, QToolTip.text()
+    assert "文字: 確認済み" in QToolTip.text() and "移動" in QToolTip.text() and w9.view.cursor().shape() == Qt.SizeAllCursor, (QToolTip.text(), w9.view.cursor().shape(), w9.sel_annot, w9.view.click_mode, w9.view.draw_mode)
     dest = QPoint(on_ft.x() - 150, on_ft.y() + 80)
     QTest.mousePress(w9.view, Qt.LeftButton, Qt.NoModifier, on_ft); wait()
     mouse_move(w9.view, QPoint(on_ft.x() - 50, on_ft.y() + 20), Qt.LeftButton); wait()
     assert w9.view.move_rect is not None and w9.drag_annot is not None, "移動中は枠を表示"
     mouse_move(w9.view, dest, Qt.LeftButton); wait()
     QTest.mouseRelease(w9.view, Qt.LeftButton, Qt.NoModifier, dest); wait(150)
-    ft2 = [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]
+    ft2 = [a for a in w9.model.annots_on_page(0) if a["kind"] == "文字"][0]
     assert w9.view.move_rect is None and w9.drag_annot is None and w9.selected_text == ""
     assert abs((ft2["rect"].x0 - ft[0]["rect"].x0) - (-150) * pr.width / pw) < 3 and abs((ft2["rect"].y0 - ft[0]["rect"].y0) - 80 * pr.height / ph) < 3, (ft[0]["rect"], ft2["rect"])
     assert "移動しました" in w9.statusBar().currentMessage()
@@ -909,28 +924,28 @@ def main():
     # 右クリック: 編集 / 文字サイズ / 色 / 削除
     on_ft2 = to_widget9(ft2["rect"], 0.3, 0.5)
     w9._ask_text = lambda title, label, default="": default.replace("田中", "佐藤")
-    w9._popup_menu = pick9("テキスト注釈を編集...")
+    w9._popup_menu = pick9("文字を編集...")
     QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
-    assert {"テキスト注釈を編集...", "文字サイズを変更...", "テキスト注釈の色を変更...", "このテキスト注釈を削除"} <= set(picks[-1]), picks[-1]
-    assert [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]["text"] == "確認済み\n佐藤"
+    assert {"文字を編集...", "文字サイズを変更...", "文字の色を変更...", "この文字を削除"} <= set(picks[-1]), picks[-1]
+    assert [a for a in w9.model.annots_on_page(0) if a["kind"] == "文字"][0]["text"] == "確認済み\n佐藤"
     w9._ask_line = lambda title, label, default="": "18"
     w9._popup_menu = pick9("文字サイズを変更...")
     QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
-    ft3 = [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]
+    ft3 = [a for a in w9.model.annots_on_page(0) if a["kind"] == "文字"][0]
     assert ft3["fontsize"] == 18.0 and ft3["rect"].width > ft2["rect"].width and abs(ft3["rect"].x0 - ft2["rect"].x0) < 0.5, (ft2["rect"], ft3["rect"])
     w9._ask_color = lambda initial, title: QColor(0, 0, 255)
-    w9._popup_menu = pick9("テキスト注釈の色を変更...")
+    w9._popup_menu = pick9("文字の色を変更...")
     QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
-    assert [a for a in w9.model.annots_on_page(0) if a["kind"] == "テキスト注釈"][0]["stroke"] == (0.0, 0.0, 1.0)
-    w9._popup_menu = pick9("このテキスト注釈を削除")
+    assert [a for a in w9.model.annots_on_page(0) if a["kind"] == "文字"][0]["stroke"] == (0.0, 0.0, 1.0)
+    w9._popup_menu = pick9("この文字を削除")
     QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ft2, w9.view.mapToGlobal(on_ft2))); wait(100)
     assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "下線", "取り消し線"] and "削除" in w9.statusBar().currentMessage()
     QTest.keyClick(w9, Qt.Key_Z, Qt.ControlModifier); wait()
-    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "下線", "取り消し線", "テキスト注釈"], "Undo で戻る"
+    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "下線", "取り消し線", "文字"], "Undo で戻る"
     w9._popup_menu = pick9("この下線を削除")
     ul = w9.model.annots_on_page(0)[1]; on_ul = to_widget9(ul["rect"])
     QApplication.sendEvent(w9.view, _CME2(_CME2.Mouse, on_ul, w9.view.mapToGlobal(on_ul))); wait(100)
-    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "取り消し線", "テキスト注釈"]
+    assert [a["kind"] for a in w9.model.annots_on_page(0)] == ["蛍光ペン", "取り消し線", "文字"]
     # 保存して他のビューアで読める形（標準の注釈）になっている
     annot_out = os.path.join(_TMP, "annots.pdf")
     QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (annot_out, ""))
@@ -942,10 +957,220 @@ def main():
     # 開き直しても既存の注釈として編集できる（色変更）
     w9.open_file(annot_out); wait(150)
     ann = w9.model.annots_on_page(0)
-    assert [a["kind"] for a in ann] == ["蛍光ペン", "取り消し線", "テキスト注釈"] and ann[0]["stroke"] == (0.0, 1.0, 0.0) and ann[2]["fontsize"] == 18.0
+    assert [a["kind"] for a in ann] == ["蛍光ペン", "取り消し線", "文字"] and ann[0]["stroke"] == (0.0, 1.0, 0.0) and ann[2]["fontsize"] == 18.0
     w9.recolor_annot(0, ann[1]["xref"]); wait()
     assert w9.model.annots_on_page(0)[1]["stroke"] == (0.0, 0.0, 1.0)
     w9.model.modified = False; assert w9.close()
+
+    step("書き込みリボン: ペン・直線・矢印・四角・丸をドラッグで描く、色・太さ・濃さ・塗り、選択して移動・大きさ変更・Delete、文字はフォント・大きさ・背景・枠、Esc")
+    w10 = MainWindow(); w10.resize(1400, 900); w10.show(); wait(50)
+    assert not w10.ribbon.isVisible() and not w10.a_write.isEnabled(), "文書なしでは書き込みを開けない"
+    w10.open_file(sel_pdf); wait(150)
+    rb = w10.ribbon
+    pr = w10.model.doc[0].rect
+    def P10(fx, fy):
+        ox, oy, pw, ph = w10.view.pix_geometry()
+        return QPoint(int(ox + pw * fx), int(oy + ph * fy))
+    def PP10(x, y):
+        ox, oy, pw, ph = w10.view.pix_geometry()
+        return QPoint(int(ox + x * pw / pr.width), int(oy + y * ph / pr.height))
+    def drag10(an, bn, mid=()):
+        v = w10.view
+        QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, an); wait(20)
+        for q in mid:
+            mouse_move(v, q, Qt.LeftButton); wait(10)
+        mouse_move(v, bn, Qt.LeftButton); wait(20)
+        QTest.mouseRelease(v, Qt.LeftButton, Qt.NoModifier, bn); wait(120)
+    def annots10():
+        return w10.model.annots_on_page(0)
+    def kinds10():
+        return [an["kind"] for an in annots10()]
+    scale = w10.view.pix_geometry()[2] / pr.width
+    w10.a_write.trigger(); wait(200)
+    assert rb.isVisible() and w10.a_write.isChecked() and w10.write_tool == "select" and rb.context() == "shape"
+    assert [rb.cb_font.itemText(i) for i in range(rb.cb_font.count())] == ["標準ゴシック", "メイリオ"], "使えるフォントだけが並ぶ"
+    assert not rb.markup_actions["highlight"].isEnabled() and "書き込み" in w10.statusBar().currentMessage()
+    # ペン: ドラッグ中は線の下書きが出て、離すと手書きの注釈になる。道具はそのまま
+    rb.tool_actions["pen"].trigger(); wait()
+    assert w10.write_tool == "pen" and w10.view.draw_mode and w10.view.cursor().shape() == Qt.CrossCursor and "ペン" in w10.statusBar().currentMessage()
+    QTest.mousePress(w10.view, Qt.LeftButton, Qt.NoModifier, P10(0.2, 0.35)); wait(20)
+    for q in (P10(0.25, 0.42), P10(0.3, 0.33), P10(0.35, 0.43)):
+        mouse_move(w10.view, q, Qt.LeftButton); wait(10)
+    assert w10.view.preview is not None and w10.view.preview["kind"] == "pen" and len(w10.view.preview["pts"]) == 4
+    QTest.mouseRelease(w10.view, Qt.LeftButton, Qt.NoModifier, P10(0.4, 0.36)); wait(120)
+    assert kinds10() == ["手書き"] and w10.view.preview is None and w10.write_tool == "pen" and w10.view.draw_mode
+    an = annots10()[0]
+    assert near(an["stroke"], (0.85, 0.10, 0.10)) and an["width"] == 2.0 and an["opacity"] == 1.0, an
+    # 外枠は線の太さぶんの余白を含むので、線そのものより少し広い
+    assert 0 <= pr.width * 0.2 - an["rect"].x0 < 12 and 0 <= an["rect"].x1 - pr.width * 0.4 < 12, an["rect"]
+    assert w10.model.modified and "線を書きました" in w10.statusBar().currentMessage()
+    QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, P10(0.8, 0.8)); wait(80)
+    assert kinds10() == ["手書き"], "クリックだけでは何も書かない"
+    # 色=青・太さ=太い → 矢印、直線
+    rb.color_buttons[1].click(); rb.cb_width.setCurrentIndex(2); wait()
+    rb.tool_actions["arrow"].trigger(); wait(); drag10(P10(0.5, 0.35), P10(0.7, 0.42))
+    an = annots10()[-1]
+    assert an["kind"] == "線" and an["arrow"] and near(an["stroke"], (0.10, 0.30, 0.85)) and an["width"] == 4.0, an
+    rb.tool_actions["line"].trigger(); wait(); drag10(P10(0.2, 0.47), P10(0.7, 0.47))
+    assert annots10()[-1]["kind"] == "線" and not annots10()[-1]["arrow"]
+    # 四角（塗りなし）、丸（塗りつぶし・濃さ 50%）
+    rb.tool_actions["rect"].trigger(); wait()
+    QTest.mousePress(w10.view, Qt.LeftButton, Qt.NoModifier, P10(0.2, 0.52)); mouse_move(w10.view, P10(0.3, 0.56), Qt.LeftButton); wait(20)
+    assert w10.view.preview["kind"] == "rect" and not w10.view.preview["fill"]
+    mouse_move(w10.view, P10(0.4, 0.6), Qt.LeftButton); QTest.mouseRelease(w10.view, Qt.LeftButton, Qt.NoModifier, P10(0.4, 0.6)); wait(120)
+    sq = annots10()[-1]
+    assert sq["kind"] == "四角" and sq["fill"] is None and sq["resizable"], sq
+    assert abs(sq["rect"].x0 - pr.width * 0.2) < 4 and abs(sq["rect"].y0 - pr.height * 0.52) < 4 and abs(sq["rect"].x1 - pr.width * 0.4) < 4 and abs(sq["rect"].y1 - pr.height * 0.6) < 4, sq["rect"]
+    rb.chk_fill.setChecked(True); rb.cb_opacity.setCurrentIndex(2); wait()
+    rb.tool_actions["ellipse"].trigger(); wait(); drag10(P10(0.5, 0.52), P10(0.7, 0.6))
+    el = annots10()[-1]
+    assert el["kind"] == "円" and near(el["fill"], (0.10, 0.30, 0.85)) and el["opacity"] == 0.5, el
+    assert kinds10() == ["手書き", "線", "線", "四角", "円"]
+    shot(w10, "write_ribbon")
+    # Esc: 道具を「選択」に戻す（リボンは開いたまま）
+    QTest.keyClick(w10, Qt.Key_Escape); wait()
+    assert rb.isVisible() and w10.write_tool == "select" and not w10.view.draw_mode and w10.view.cursor().shape() != Qt.CrossCursor
+    # 選択: 四角をクリック → 枠とつまみが出て、リボンは四角の見た目（塗りなし・濃さ 100%）を映す
+    QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, PP10(sq["rect"].x0 + 2, sq["rect"].y0 + 10)); wait(100)
+    assert w10.sel_annot == (0, sq["xref"]) and w10.view.annot_box is not None and w10.view.annot_handle and w10.a_del_annot.isEnabled()
+    assert not rb.chk_fill.isChecked() and rb.cb_opacity.currentData() == 1.0 and rb.cb_width.currentData() == 4.0 and rb.context() == "shape"
+    assert kinds10() == ["手書き", "線", "線", "四角", "円"] and annots10()[3]["rect"] == sq["rect"], "クリックだけでは動かない"
+    # つまみ（右下の四角）をドラッグして大きさ変更
+    handle = PP10(sq["rect"].x1, sq["rect"].y1)
+    mouse_move(w10.view, handle); wait(60)
+    assert w10.view.cursor().shape() == Qt.SizeFDiagCursor
+    QTest.mousePress(w10.view, Qt.LeftButton, Qt.NoModifier, handle); mouse_move(w10.view, QPoint(handle.x() + 30, handle.y() + 20), Qt.LeftButton); wait(20)
+    assert w10.view.move_rect is not None and w10._drag["kind"] == "resize"
+    mouse_move(w10.view, QPoint(handle.x() + 60, handle.y() + 40), Qt.LeftButton)
+    QTest.mouseRelease(w10.view, Qt.LeftButton, Qt.NoModifier, QPoint(handle.x() + 60, handle.y() + 40)); wait(120)
+    sq2 = w10.model.annot_info(*w10.sel_annot)
+    assert abs(sq2["rect"].width - (sq["rect"].width + 60 / scale)) < 2 and abs(sq2["rect"].height - (sq["rect"].height + 40 / scale)) < 2, (sq["rect"], sq2["rect"])
+    assert abs(sq2["rect"].x0 - sq["rect"].x0) < 0.5 and "大きさ" in w10.statusBar().currentMessage() and w10.view.move_rect is None
+    # 本体をドラッグして移動（選択は続く）
+    grab = PP10(sq2["rect"].x0 + 3, sq2["rect"].y0 + 12)
+    drag10(grab, QPoint(grab.x() - 40, grab.y() + 50))
+    sq3 = w10.model.annot_info(*w10.sel_annot)
+    assert abs(sq3["rect"].x0 - (sq2["rect"].x0 - 40 / scale)) < 2 and abs(sq3["rect"].y0 - (sq2["rect"].y0 + 50 / scale)) < 2 and abs(sq3["rect"].width - sq2["rect"].width) < 0.6
+    assert w10.view.annot_box is not None and abs(w10.view.annot_box[0] - sq3["rect"].x0 / pr.width) < 0.001, "選択の枠は移動先に付く"
+    # 選択中にリボンを変えると、その書き込みに反映される
+    rb.color_buttons[3].click(); wait(100)
+    assert near(w10.model.annot_info(*w10.sel_annot)["stroke"], (0.0, 0.55, 0.20))
+    rb.chk_fill.setChecked(True); wait(100)
+    assert near(w10.model.annot_info(*w10.sel_annot)["fill"], (0.0, 0.55, 0.20))
+    rb.cb_width.setCurrentIndex(3); rb.cb_opacity.setCurrentIndex(1); wait(100)
+    an = w10.model.annot_info(*w10.sel_annot); assert an["width"] == 8.0 and an["opacity"] == 0.75, an
+    # 手書きも選んで移動・拡大できる
+    ink = annots10()[0]
+    QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, PP10(ink["rect"].x0 + ink["rect"].width / 2, ink["rect"].y0 + ink["rect"].height / 2)); wait(100)
+    assert w10.sel_annot is not None and w10.model.annot_info(*w10.sel_annot)["kind"] == "手書き" and w10.view.annot_handle
+    h2 = PP10(ink["rect"].x1, ink["rect"].y1)
+    drag10(h2, QPoint(h2.x() + 50, h2.y() + 50))
+    ink2 = w10.model.annot_info(*w10.sel_annot)
+    assert ink2["kind"] == "手書き" and abs(ink2["rect"].width - (ink["rect"].width + 50 / scale)) < 2.5 and ink2["width"] == 2.0, (ink["rect"], ink2["rect"])
+    # Delete キー: 書き込みを選んでいるときは、ページではなく書き込みだけを消す
+    n_pages = w10.model.page_count
+    QTest.keyClick(w10, Qt.Key_Delete); wait(100)
+    assert "手書き" not in kinds10() and w10.model.page_count == n_pages and w10.sel_annot is None and w10.view.annot_box is None and not w10.a_del_annot.isEnabled()
+    QTest.keyClick(w10, Qt.Key_Z, Qt.ControlModifier); wait(100)
+    assert "手書き" in kinds10(), "Undo で戻る"
+    # 文字: メイリオ・16pt・背景=黄・枠あり。文字用の設定に切り替わる
+    rb.tool_actions["text"].trigger(); wait()
+    assert rb.context() == "text" and w10.view.text_mode and not w10.view.draw_mode
+    rb.cb_font.setCurrentIndex(rb.cb_font.findData("meiryo")); rb.sp_size.setValue(16); rb.cb_bg.setCurrentIndex(2); rb.chk_border.setChecked(True)
+    rb.color_buttons[0].click(); wait()
+    w10._ask_text = lambda title, label, default="": "確認済み 山田\n2026/11/13"
+    QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, P10(0.2, 0.72)); wait(150)
+    ft = [an for an in annots10() if an["kind"] == "文字"]
+    assert len(ft) == 1 and ft[0]["font"] == "meiryo" and ft[0]["fontsize"] == 16.0 and near(ft[0]["fill"], (1.0, 1.0, 0.8)) and ft[0]["border"], ft
+    assert near(ft[0]["stroke"], (0.85, 0.10, 0.10)) and ft[0]["text"] == "確認済み 山田\n2026/11/13" and w10.sel_annot == (0, ft[0]["xref"])
+    assert abs(ft[0]["rect"].x0 - pr.width * 0.2) < 3 and abs(ft[0]["rect"].y0 - pr.height * 0.72) < 3
+    pix = w10.model.render(0, 1.0); r = ft[0]["rect"]
+    reds = sum(1 for yy in range(int(r.y0), int(r.y1)) for xx in range(int(r.x0), int(r.x1)) if pix.pixel(xx, yy)[0] > 150 and pix.pixel(xx, yy)[1] < 100)
+    assert reds > 30, reds
+    # 文字の道具のまま、書いてある文字をクリックすると、新しく増やさずに直す
+    w10._ask_text = lambda title, label, default="": default + " 済"
+    on_ft = PP10(r.x0 + r.width / 2, r.y0 + r.height / 2)
+    QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, on_ft); wait(150)
+    ft = [an for an in annots10() if an["kind"] == "文字"]
+    assert len(ft) == 1 and ft[0]["text"].endswith(" 済") and ft[0]["font"] == "meiryo"
+    # 選択の道具ではダブルクリックで直せる
+    rb.tool_actions["select"].trigger(); wait()
+    w10._ask_text = lambda title, label, default="": default.replace(" 済", " 確認")
+    QTest.mouseDClick(w10.view, Qt.LeftButton, Qt.NoModifier, on_ft); wait(150)
+    ft = [an for an in annots10() if an["kind"] == "文字"]
+    assert len(ft) == 1 and ft[0]["text"].endswith(" 確認"), ft
+    assert w10.sel_annot == (0, ft[0]["xref"]) and rb.context() == "text", "文字を選ぶと文字用の設定が出る"
+    assert rb.font_key() == "meiryo" and rb.fontsize() == 16.0 and rb.text_border()
+    # 選択中の文字に、フォント・大きさ・背景・枠を適用
+    rb.cb_font.setCurrentIndex(0); wait(100)
+    assert w10.model.annot_info(*w10.sel_annot)["font"] == "builtin"
+    rb.sp_size.setValue(20); wait(100); rb.cb_bg.setCurrentIndex(0); wait(100); rb.chk_border.setChecked(False); wait(100)
+    an = w10.model.annot_info(*w10.sel_annot)
+    assert an["fontsize"] == 20.0 and an["fill"] is None and not an["border"] and an["text"].endswith(" 確認"), an
+    # つまみで幅を狭めると折り返して高くなる
+    h3 = PP10(an["rect"].x1, an["rect"].y1)
+    drag10(h3, QPoint(h3.x() - int(an["rect"].width * scale * 0.5), h3.y()))
+    bn = w10.model.annot_info(*w10.sel_annot)
+    assert bn["rect"].width < an["rect"].width * 0.7 and bn["rect"].height > an["rect"].height, (an["rect"], bn["rect"])
+    # 文字を空にすると消える
+    w10._ask_text = lambda title, label, default="": ""
+    QTest.mouseDClick(w10.view, Qt.LeftButton, Qt.NoModifier, PP10(bn["rect"].x0 + 8, bn["rect"].y0 + 8)); wait(150)
+    assert "文字" not in kinds10() and w10.sel_annot is None
+    QTest.keyClick(w10, Qt.Key_Z, Qt.ControlModifier); wait(100)
+    assert "文字" in kinds10()
+    # マーカー: 文字を選ぶとリボンの蛍光ペンが押せる
+    words = w10.model.page_words(0)
+    wr = words[0]["rect"]
+    drag10(PP10(wr.x0 + 2, wr.y0 + wr.height / 2), PP10(wr.x1 - 2, wr.y0 + wr.height / 2))
+    assert w10.selected_text == "Hello" and rb.markup_actions["highlight"].isEnabled() and rb.markup_actions["strikeout"].isEnabled()
+    rb.markup_actions["highlight"].trigger(); wait(120)
+    assert "蛍光ペン" in kinds10() and w10.selected_text == "" and not rb.markup_actions["highlight"].isEnabled()
+    # 押印・付箋モードとは排他
+    w10.stamp_dock_widget.list.setCurrentRow(0)
+    QTest.keyClick(w10, Qt.Key_F2); wait(250)
+    assert w10.stamp_mode and not rb.isVisible() and not w10.a_write.isChecked(), "押印モードに入るとリボンを閉じる"
+    QTest.keyClick(w10, Qt.Key_F4); wait(250)
+    assert rb.isVisible() and not w10.stamp_mode and not w10.a_stamp.isChecked(), "リボンを開くと押印モードを終える"
+    QTest.keyClick(w10, Qt.Key_F3); wait(100)
+    assert w10.note_mode and not rb.isVisible()
+    QTest.keyClick(w10, Qt.Key_F4); wait(100)
+    assert rb.isVisible() and not w10.note_mode and w10.write_tool == "select"
+    # 「閉じる」ボタン、Esc 2 回（道具 → リボン）
+    rb.a_close.trigger(); wait()
+    assert not rb.isVisible() and not w10.a_write.isChecked()
+    w10.a_write.trigger(); wait(); rb.tool_actions["pen"].trigger(); wait()
+    QTest.keyClick(w10, Qt.Key_Escape); wait()
+    assert rb.isVisible() and w10.write_tool == "select"
+    QTest.keyClick(w10, Qt.Key_Escape); wait()
+    assert not rb.isVisible() and not w10.view.draw_mode and not w10.view.text_mode
+    # リボンを閉じていても、選んで動かす・Delete で消すことはできる
+    el = [an for an in annots10() if an["kind"] == "円"][0]
+    c = PP10(el["rect"].x0 + el["rect"].width / 2, el["rect"].y0 + el["rect"].height / 2)
+    drag10(c, QPoint(c.x() + 30, c.y()))
+    scale = w10.view.pix_geometry()[2] / pr.width       # 押印モードで印鑑パネルが開いたので、表示の倍率が変わっている
+    assert abs(w10.model.annot_info(*w10.sel_annot)["rect"].x0 - (el["rect"].x0 + 30 / scale)) < 2
+    # 保存しても選択中の書き込みを指し続ける。開き直すと種類・フォントが残っている
+    write_out = os.path.join(_TMP, "write.pdf")
+    QFileDialog.getSaveFileName = staticmethod(lambda *a_, **k: (write_out, ""))
+    w10.a_saveas.trigger(); wait(150)
+    assert w10.model.annot_info(*w10.sel_annot)["kind"] == "円", "保存で選択が別のものに変わらない"
+    _d = fitz.open(write_out); _pg = _d[0]
+    assert sorted(an.type[1] for an in _pg.annots()) == ["Circle", "FreeText", "Highlight", "Ink", "Line", "Line", "Square"], sorted(an.type[1] for an in _pg.annots())
+    del _pg; _d.close()
+    assert os.path.getsize(write_out) < 200_000, os.path.getsize(write_out)
+    w10.model.modified = False; assert w10.close()
+    # 色・太さなどの設定は次回に引き継ぐ。リボンは起動時には出ない
+    w11 = MainWindow(); w11.show(); wait(50)
+    # （選択した書き込みの見た目をリボンに映すので、最後に映した値が引き継がれる）
+    assert not w11.ribbon.isVisible() and near(w11.ribbon.color(), (0.85, 0.10, 0.10)) and w11.ribbon.fontsize() == 20.0, (w11.ribbon.color(), w11.ribbon.fontsize())
+    assert os.path.isfile(os.path.join(os.environ["APPDATA"], "PdfPageEditor", "fonts.json")), "フォントの確認結果を保存している"
+    w11.open_file(write_out); wait(150)
+    ft = [an for an in w11.model.annots_on_page(0) if an["kind"] == "文字"][0]
+    assert ft["font"] == "builtin" and ft["fontsize"] == 20.0 and ft["text"].endswith(" 確認")
+    w11.a_write.trigger(); wait(200)
+    assert w11.ribbon.isVisible() and w11.ribbon.font_key() == "builtin"
+    w11.model.modified = False; assert w11.close()
+
 
     step("自動アップデート: 最新なら「最新です」、新版なら更新ダイアログ、スキップは記憶、更新するとダウンロード→インストーラー起動→終了")
     import io, json

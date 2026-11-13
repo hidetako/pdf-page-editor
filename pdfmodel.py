@@ -5,6 +5,7 @@ PyMuPDF (fitz) をラップし、ページ並べ替え・回転・削除・挿�
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import tempfile
@@ -12,16 +13,20 @@ from typing import Iterable, Sequence
 
 import pymupdf as fitz  # PyMuPDF
 
+import fonts
+
 _CM_RE = re.compile(r"([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) ([-\d.]+) cm")
 _DA_COLOR_RE = re.compile(r"([-\d.]+) ([-\d.]+) ([-\d.]+) rg")
 _DA_FONT_RE = re.compile(r"/\S+ ([-\d.]+) Tf")
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".tif", ".tiff", ".webp"}
 MAX_UNDO = 20
+MAX_UNDO_BYTES = 400 * 1024 * 1024   # 元に戻す用の控えの合計がこれを超えたら、古いものから捨てる（最低 MIN_UNDO 回ぶんは残す）
+MIN_UNDO = 3
 
 # 注釈の種類 → 表示名
 ANNOT_KINDS = {
     fitz.PDF_ANNOT_TEXT: "付箋",
-    fitz.PDF_ANNOT_FREE_TEXT: "テキスト注釈",
+    fitz.PDF_ANNOT_FREE_TEXT: "文字",
     fitz.PDF_ANNOT_HIGHLIGHT: "蛍光ペン",
     fitz.PDF_ANNOT_UNDERLINE: "下線",
     fitz.PDF_ANNOT_STRIKE_OUT: "取り消し線",
@@ -39,6 +44,10 @@ ANNOT_KINDS = {
 }
 # 文字の範囲に付く注釈（位置は文字で決まるので移動できない）
 MARKUP_TYPES = {fitz.PDF_ANNOT_HIGHLIGHT, fitz.PDF_ANNOT_UNDERLINE, fitz.PDF_ANNOT_STRIKE_OUT, fitz.PDF_ANNOT_SQUIGGLY}
+# 外枠をドラッグして大きさを変えられる注釈
+RESIZABLE_TYPES = {fitz.PDF_ANNOT_SQUARE, fitz.PDF_ANNOT_CIRCLE, fitz.PDF_ANNOT_INK, fitz.PDF_ANNOT_LINE, fitz.PDF_ANNOT_FREE_TEXT}
+MIN_ANNOT_SIZE = 6.0     # 大きさ変更の下限 (pt)
+_UNSET = object()        # 「指定なし」（None は「塗りなし」などの意味で使うため）
 MARKUP_KINDS = {"highlight": fitz.PDF_ANNOT_HIGHLIGHT, "underline": fitz.PDF_ANNOT_UNDERLINE, "strikeout": fitz.PDF_ANNOT_STRIKE_OUT}
 _SKIP_TYPES = {fitz.PDF_ANNOT_POPUP, fitz.PDF_ANNOT_LINK, fitz.PDF_ANNOT_WIDGET}
 # 制限（permissions ビットが立っていない = 禁止）
@@ -132,6 +141,9 @@ class PdfModel:
     def _push_undo(self) -> None:
         self._undo.append(self._snapshot())
         if len(self._undo) > MAX_UNDO:
+            self._undo.pop(0)
+        # 控えは文書まるごとの写しなので、大きな PDF に手書きを重ねるとメモリを使い切る。合計の大きさでも制限する
+        while len(self._undo) > MIN_UNDO and sum(len(b) for b in self._undo) > MAX_UNDO_BYTES:
             self._undo.pop(0)
         self._redo.clear()
 
@@ -358,8 +370,9 @@ class PdfModel:
     def annots_on_page(self, index: int) -> list[dict]:
         """ページ上の注釈一覧（ポップアップ・リンク・フォーム部品を除く）。rect は表示座標。
 
-        type: PyMuPDF の種類番号, kind: 表示名, text: 内容, movable: ドラッグで動かせるか,
-        stroke: 線・文字の色 (r, g, b) または None, fontsize: テキスト注釈の文字サイズ
+        type: PyMuPDF の種類番号, kind: 表示名, text: 内容, movable / resizable: 動かせるか・大きさを変えられるか,
+        stroke: 線・文字の色 (r, g, b) または None, fill: 塗りの色または None, width: 線の太さ, opacity: 濃さ (0〜1),
+        fontsize / font: 文字の書き込みの文字サイズとフォント（font はこのアプリで書いたものだけ）, border: 枠線の有無
         """
         doc = self._require()
         page = doc[index]
@@ -369,6 +382,10 @@ class PdfModel:
             if t in _SKIP_TYPES:
                 continue
             info = annot.info
+            colors = annot.colors
+            c = colors.get("stroke") or []
+            fl = colors.get("fill") or []
+            opacity = annot.opacity
             d = {
                 "xref": annot.xref,
                 "type": t,
@@ -377,15 +394,30 @@ class PdfModel:
                 "text": info.get("content", ""),
                 "title": info.get("title", ""),
                 "movable": t not in MARKUP_TYPES,
-                "stroke": None,
+                "resizable": t in RESIZABLE_TYPES,
+                "stroke": tuple(c[:3]) if len(c) >= 3 else (tuple(fl[:3]) if len(fl) >= 3 else None),
+                "fill": tuple(fl[:3]) if len(fl) >= 3 else None,
+                "width": max(0.0, float(annot.border.get("width", 1.0) or 0.0)),
+                "opacity": 1.0 if opacity is None or opacity < 0 else float(opacity),
                 "fontsize": None,
+                "font": None,
+                "border": False,
+                "arrow": False,
             }
+            if t == fitz.PDF_ANNOT_LINE:
+                d["arrow"] = any(e not in (fitz.PDF_ANNOT_LE_NONE,) for e in (annot.line_ends or ()))
             if t == fitz.PDF_ANNOT_FREE_TEXT:
-                col, size = _parse_da(doc.xref_get_key(annot.xref, "DA")[1])
-                d["stroke"], d["fontsize"] = col, size
-            else:
-                c = annot.colors.get("stroke") or annot.colors.get("fill") or []
-                d["stroke"] = tuple(c[:3]) if len(c) >= 3 else None
+                spec = _ppe(doc, annot.xref)
+                if spec is not None:
+                    d["stroke"] = tuple(spec.get("color") or (0, 0, 0))
+                    d["fontsize"] = float(spec.get("size") or 12)
+                    d["font"] = spec.get("font") or fonts.BUILTIN
+                    d["fill"] = tuple(spec["fill"]) if spec.get("fill") else None
+                    d["border"] = bool(spec.get("border"))
+                    d["width"] = float(spec.get("bw") or 1.0)
+                else:
+                    col, size = _parse_da(doc.xref_get_key(annot.xref, "DA")[1])
+                    d["stroke"], d["fontsize"], d["fill"] = col, size, None
             out.append(d)
         return out
 
@@ -400,12 +432,19 @@ class PdfModel:
                 hits.append(a)
         return hits[-1] if hits else None
 
+    def annot_info(self, index: int, xref: int) -> dict | None:
+        """xref の注釈の情報（annots_on_page の 1 件）。無ければ None。"""
+        if self.doc is None or not (0 <= index < self.page_count):
+            return None
+        return next((a for a in self.annots_on_page(index) if a["xref"] == xref), None)
+
     def _find_annot(self, page, xref: int):
         for annot in page.annots():
             if annot.xref == xref:
                 return annot
         raise ValueError("注釈が見つかりません。")
 
+    # ---- 追加
     def add_markup(self, index: int, kind: str, rects: Sequence, color: tuple[float, float, float] | None = None) -> int:
         """文字の範囲（表示座標の矩形列）に蛍光ペン / 下線 / 取り消し線を付ける。注釈の xref を返す。"""
         doc = self._require()
@@ -427,92 +466,337 @@ class PdfModel:
         self.modified = True
         return annot.xref
 
-    def add_free_text(self, index: int, point: tuple[float, float], text: str, fontsize: float = 12,
-                      color: tuple[float, float, float] = (0.85, 0.1, 0.1)) -> int:
-        """表示座標 point を左上として、文字を書き込むテキスト注釈を置く。注釈の xref を返す。
-        大きさは文字数と行数から決める（ページ右端・下端で切る）。"""
+    def add_ink(self, index: int, strokes: Sequence[Sequence[tuple[float, float]]],
+                color: tuple[float, float, float] = (0.85, 0.1, 0.1), width: float = 2.0, opacity: float = 1.0) -> int:
+        """手書きの線を追加する。strokes は表示座標の点列のリスト（1 画 = 1 リスト）。注釈の xref を返す。"""
         doc = self._require()
         page = doc[index]
-        prect = page.rect * page.rotation_matrix
-        pw, ph = prect.width, prect.height
-        lines = text.split("\n") or [""]
-        width = max(fitz.get_text_length(ln, fontname="japan", fontsize=fontsize) for ln in lines) + fontsize + 6
-        height = len(lines) * fontsize * 1.35 + 8
-        x, y = point
-        x = max(0.0, min(x, pw - 20))
-        y = max(0.0, min(y, ph - 20))
-        width = min(width, pw - x)
-        height = min(height, ph - y)
-        rect = (fitz.Rect(x, y, x + width, y + height) * page.derotation_matrix).normalize()
+        der = page.derotation_matrix
+        pts = [[tuple(fitz.Point(*p) * der) for p in s] for s in strokes if len(s) >= 2]
+        if not pts:
+            raise ValueError("線が短すぎます。")
         self._push_undo()
-        annot = page.add_freetext_annot(rect, text, fontsize=fontsize, fontname="japan", text_color=color,
-                                        rotate=page.rotation)
+        annot = self._make_ink(page, pts, color, width, opacity)
+        self.modified = True
+        return annot.xref
+
+    def add_line(self, index: int, p1: tuple[float, float], p2: tuple[float, float],
+                 color: tuple[float, float, float] = (0.85, 0.1, 0.1), width: float = 2.0, opacity: float = 1.0,
+                 arrow: bool = False) -> int:
+        """直線（arrow=True なら終点に矢じり）を追加する。座標は表示座標。注釈の xref を返す。"""
+        doc = self._require()
+        page = doc[index]
+        der = page.derotation_matrix
+        self._push_undo()
+        ends = (fitz.PDF_ANNOT_LE_NONE, fitz.PDF_ANNOT_LE_CLOSED_ARROW if arrow else fitz.PDF_ANNOT_LE_NONE)
+        annot = self._make_line(page, [tuple(fitz.Point(*p1) * der), tuple(fitz.Point(*p2) * der)], ends, color, width, opacity)
+        self.modified = True
+        return annot.xref
+
+    def add_shape(self, index: int, kind: str, rect, color: tuple[float, float, float] = (0.85, 0.1, 0.1),
+                  width: float = 2.0, opacity: float = 1.0, fill: tuple[float, float, float] | None = None) -> int:
+        """四角 (kind="rect") または丸 (kind="ellipse") を追加する。rect は表示座標。注釈の xref を返す。"""
+        doc = self._require()
+        page = doc[index]
+        r = (fitz.Rect(rect).normalize() * page.derotation_matrix).normalize()
+        if r.width < 1 or r.height < 1:
+            raise ValueError("図形が小さすぎます。")
+        self._push_undo()
+        annot = page.add_rect_annot(r) if kind == "rect" else page.add_circle_annot(r)
+        annot.set_border(width=width)
+        annot.set_colors(stroke=color, fill=fill if fill is not None else [])
+        if opacity < 1:
+            annot.set_opacity(opacity)
         annot.update()
         self.modified = True
         return annot.xref
 
-    def set_annot_text(self, index: int, xref: int, text: str) -> None:
-        """付箋・テキスト注釈の内容を変更する。"""
+    @staticmethod
+    def _make_ink(page, strokes, color, width, opacity, title: str = "", content: str = ""):
+        annot = page.add_ink_annot([[tuple(p) for p in s] for s in strokes])
+        annot.set_border(width=width)
+        annot.set_colors(stroke=color)
+        if opacity < 1:
+            annot.set_opacity(opacity)
+        if title or content:
+            annot.set_info(title=title, content=content)
+        annot.update()
+        return annot
+
+    @staticmethod
+    def _make_line(page, pts, ends, color, width, opacity, title: str = "", content: str = ""):
+        annot = page.add_line_annot(tuple(pts[0]), tuple(pts[1]))
+        annot.set_line_ends(*ends)
+        annot.set_border(width=width)
+        annot.set_colors(stroke=color, fill=color)
+        if opacity < 1:
+            annot.set_opacity(opacity)
+        if title or content:
+            annot.set_info(title=title, content=content)
+        annot.update()
+        return annot
+
+    # ---- 文字の書き込み（埋め込みフォントで描くテキストボックス）
+    def add_text_box(self, index: int, point: tuple[float, float], text: str, font: str = fonts.BUILTIN,
+                     fontsize: float = 12, color: tuple[float, float, float] = (0.85, 0.1, 0.1),
+                     fill: tuple[float, float, float] | None = None, border: bool = False,
+                     wrap_width: float | None = None, title: str = "") -> int:
+        """表示座標 point を左上として文字を書き込む。フォントは PDF に埋め込むので、どのソフトでも同じ見た目になる。
+
+        注釈（FreeText）として保存し、見た目だけを埋め込みフォントで描いたものに差し替える。注釈の xref を返す。
+        wrap_width を指定するとその幅で折り返す。指定しなければ文字に合わせた幅（ページの右端まで）にする。
+        """
+        self._require()
+        spec = {"v": 1, "font": fonts.resolve(font), "size": float(fontsize), "color": [float(c) for c in color[:3]],
+                "fill": [float(c) for c in fill[:3]] if fill else None, "border": bool(border), "bw": 1.0,
+                "wrap": wrap_width is not None}
+        self._push_undo()
+        xref = self._build_text_box(index, spec, text, fitz.Point(*point), wrap_width, title)
+        self.modified = True
+        return xref
+
+    def add_free_text(self, index: int, point: tuple[float, float], text: str, fontsize: float = 12,
+                      color: tuple[float, float, float] = (0.85, 0.1, 0.1)) -> int:
+        """旧 API（1.4.0）。標準ゴシックの add_text_box と同じ。"""
+        return self.add_text_box(index, point, text, fonts.BUILTIN, fontsize, color)
+
+    def _build_text_box(self, index: int, spec: dict, text: str, top_left: fitz.Point,
+                        wrap_width: float | None, title: str = "") -> int:
+        """spec の見た目でテキストボックスを作る（Undo の記録と modified は呼び出し側）。"""
+        doc = self._require()
+        page = doc[index]
+        rotation = page.rotation
+        pw, ph = page.rect.width, page.rect.height       # 表示上の大きさ（回転後）
+        x = max(0.0, min(top_left.x, pw - 20))
+        y = max(0.0, min(top_left.y, ph - 10))
+        if wrap_width is not None:
+            wrap_width = max(20.0, min(wrap_width, pw - x))
+        color = tuple(spec["color"])
+        fill = tuple(spec["fill"]) if spec.get("fill") else None
+        border = color if spec.get("border") else None
+        w, h = fonts.measure(text, spec["font"], spec["size"], wrap_width, max_width=pw - x)
+        if y + h > ph:
+            y = max(0.0, ph - h)
+        src, w, h = fonts.render_text_pdf(text, spec["font"], spec["size"], color, wrap_width=w, fill=fill,
+                                          border=border, border_width=spec.get("bw", 1.0), rotation=rotation)
+        del page
+        # 見た目（フォーム XObject）を文書に取り込む。作業用のページを末尾に足して貼り、すぐ消す
+        sp = doc.new_page(-1, width=src[0].rect.width, height=src[0].rect.height)
+        xobj = sp.show_pdf_page(sp.rect, src, 0)
+        del sp
+        doc.delete_page(doc.page_count - 1)
+        src.close()
+        page = doc[index]
+        prect = (fitz.Rect(x, y, x + w, y + h) * page.derotation_matrix).normalize()
+        annot = page.add_freetext_annot(prect, text, fontsize=spec["size"], fontname="helv", text_color=color)
+        xref = annot.xref
+        del annot
+        # ここから先は annot.update() を呼ばない（呼ぶと MuPDF が標準フォントで見た目を作り直してしまう）
+        spec = dict(spec, rot=rotation)
+        doc.xref_set_key(xref, "AP", f"<</N {xobj} 0 R>>")
+        doc.xref_set_key(xref, "PPE", fitz.get_pdf_str(json.dumps(spec, separators=(",", ":"))))
+        if title:
+            doc.xref_set_key(xref, "T", fitz.get_pdf_str(title))
+        return xref
+
+    def _rebuild_text_box(self, index: int, xref: int, *, spec: dict | None = None, text: str | None = None,
+                          top_left: fitz.Point | None = None, wrap_width: float | None = None,
+                          natural: bool = False) -> int:
+        """このアプリで書いたテキストボックスを、内容や見た目を変えて作り直す。新しい xref を返す。"""
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        old = _ppe(doc, xref) or {}
+        disp = (annot.rect * page.rotation_matrix).normalize()
+        info = annot.info
+        cur_text = info.get("content", "")
+        title = info.get("title", "")
+        page.delete_annot(annot)
+        del annot, page
+        new_spec = dict(old)
+        if spec:
+            new_spec.update(spec)
+        new_spec["font"] = fonts.resolve(new_spec.get("font"))
+        if wrap_width is not None:
+            new_spec["wrap"] = True
+        elif natural and not new_spec.get("wrap"):
+            wrap_width = None                       # 文字に合わせた幅に測り直す
+        else:
+            wrap_width = disp.width                 # 今の幅のまま
+        return self._build_text_box(index, new_spec, cur_text if text is None else text,
+                                    top_left or disp.tl, wrap_width, title)
+
+    # ---- 変更
+    def set_annot_text(self, index: int, xref: int, text: str) -> int:
+        """付箋・文字の書き込みの内容を変更する。注釈の xref を返す（作り直した場合は新しい番号）。"""
         doc = self._require()
         page = doc[index]
         annot = self._find_annot(page, xref)
         self._push_undo()
+        self.modified = True
+        if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT and _ppe(doc, xref) is not None:
+            del annot, page
+            return self._rebuild_text_box(index, xref, text=text, natural=True)
         annot.set_info(content=text)
         if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
             col, size = _parse_da(doc.xref_get_key(xref, "DA")[1])
             annot.update(fontname="japan", fontsize=size, text_color=col)
         else:
             annot.update()
-        self.modified = True
+        return xref
 
-    def set_annot_color(self, index: int, xref: int, color: tuple[float, float, float]) -> None:
-        """注釈の色（テキスト注釈は文字色、それ以外は線・マーカーの色）を変更する。"""
+    def set_annot_style(self, index: int, xref: int, *, color: tuple[float, float, float] | None = None,
+                        width: float | None = None, opacity: float | None = None, fill=_UNSET,
+                        font: str | None = None, fontsize: float | None = None, border=_UNSET) -> int:
+        """注釈の見た目を変える。指定した項目だけ変える。fill=None は塗りなし。注釈の xref を返す。
+
+        文字の書き込みでは color は文字色、width は使わない。それ以外では font / fontsize / border は使わない。
+        """
         doc = self._require()
         page = doc[index]
         annot = self._find_annot(page, xref)
+        t = annot.type[0]
         self._push_undo()
-        if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
-            _col, size = _parse_da(doc.xref_get_key(xref, "DA")[1])
-            annot.update(fontname="japan", fontsize=size, text_color=color)
-        else:
-            annot.set_colors(stroke=color)
-            annot.update()
         self.modified = True
+        if t == fitz.PDF_ANNOT_FREE_TEXT:
+            if _ppe(doc, xref) is not None:
+                spec: dict = {}
+                if color is not None:
+                    spec["color"] = [float(c) for c in color[:3]]
+                if font is not None:
+                    spec["font"] = font
+                if fontsize is not None:
+                    spec["size"] = float(fontsize)
+                if fill is not _UNSET:
+                    spec["fill"] = [float(c) for c in fill[:3]] if fill else None
+                if border is not _UNSET:
+                    spec["border"] = bool(border)
+                del annot, page
+                return self._rebuild_text_box(index, xref, spec=spec, natural=font is not None or fontsize is not None)
+            # 他のソフト（または 1.4.0 以前）の文字注釈: 標準の作り直しに任せる
+            col, size = _parse_da(doc.xref_get_key(xref, "DA")[1])
+            if fontsize is not None and fontsize != size:
+                k = fontsize / (size or fontsize)
+                r = (annot.rect * page.rotation_matrix).normalize()   # 表示上の左上を固定して拡縮
+                disp = fitz.Rect(r.x0, r.y0, r.x0 + r.width * k, r.y0 + r.height * k)
+                annot.set_rect((disp * page.derotation_matrix).normalize())
+            annot.update(fontname="japan", fontsize=fontsize or size, text_color=color or col)
+            return xref
+        if color is not None or fill is not _UNSET:
+            kw = {}
+            if color is not None:
+                kw["stroke"] = color
+                if t == fitz.PDF_ANNOT_LINE:
+                    kw["fill"] = color              # 矢じりの塗り
+            if fill is not _UNSET and t in (fitz.PDF_ANNOT_SQUARE, fitz.PDF_ANNOT_CIRCLE):
+                kw["fill"] = fill if fill else []
+            annot.set_colors(**kw)
+        if width is not None and t not in MARKUP_TYPES and t != fitz.PDF_ANNOT_TEXT:
+            annot.set_border(width=width)
+        if opacity is not None:
+            annot.set_opacity(opacity)
+        annot.update()
+        return xref
 
-    def set_annot_fontsize(self, index: int, xref: int, fontsize: float) -> None:
-        """テキスト注釈の文字サイズを変更する（枠の大きさも合わせて変える）。"""
+    def set_annot_color(self, index: int, xref: int, color: tuple[float, float, float]) -> int:
+        """注釈の色（文字の書き込みは文字色、それ以外は線・マーカーの色）を変更する。"""
+        return self.set_annot_style(index, xref, color=color)
+
+    def set_annot_fontsize(self, index: int, xref: int, fontsize: float) -> int:
+        """文字の書き込みの文字サイズを変更する（枠の大きさも合わせて変わる）。"""
         doc = self._require()
-        page = doc[index]
-        annot = self._find_annot(page, xref)
-        if annot.type[0] != fitz.PDF_ANNOT_FREE_TEXT:
-            raise ValueError("文字サイズを変えられるのはテキスト注釈だけです。")
-        col, old = _parse_da(doc.xref_get_key(xref, "DA")[1])
-        self._push_undo()
-        k = fontsize / (old or fontsize)
-        r = (annot.rect * page.rotation_matrix).normalize()   # 表示上の左上を固定して拡縮
-        disp = fitz.Rect(r.x0, r.y0, r.x0 + r.width * k, r.y0 + r.height * k)
-        annot.set_rect((disp * page.derotation_matrix).normalize())
-        annot.update(fontname="japan", fontsize=fontsize, text_color=col)
-        self.modified = True
+        page = doc[index]       # ページを変数で持っておく（手放すと注釈が無効になる）
+        is_text = self._find_annot(page, xref).type[0] == fitz.PDF_ANNOT_FREE_TEXT
+        del page
+        if not is_text:
+            raise ValueError("文字サイズを変えられるのは文字の書き込みだけです。")
+        return self.set_annot_style(index, xref, fontsize=fontsize)
 
-    def move_annot(self, index: int, xref: int, dx: float, dy: float) -> None:
-        """注釈を表示座標で (dx, dy) だけ動かす。蛍光ペンなど文字に付く注釈は動かせない。"""
+    def move_annot(self, index: int, xref: int, dx: float, dy: float) -> int:
+        """注釈を表示座標で (dx, dy) だけ動かす。蛍光ペンなど文字に付く注釈は動かせない。注釈の xref を返す。"""
         doc = self._require()
         page = doc[index]
         annot = self._find_annot(page, xref)
         if annot.type[0] in MARKUP_TYPES:
             raise ValueError(f"{ANNOT_KINDS.get(annot.type[0], '')}は文字の位置に付くので移動できません。")
         if abs(dx) < 0.01 and abs(dy) < 0.01:
-            return
+            return xref
+        disp = (annot.rect * page.rotation_matrix).normalize()
+        del annot, page
+        return self._transform_annot(index, xref, disp + (dx, dy, dx, dy))
+
+    def resize_annot(self, index: int, xref: int, rect) -> int:
+        """注釈の外枠を表示座標の rect に合わせて大きさを変える。注釈の xref を返す。
+
+        手書き・直線は中の線ごと拡大縮小する。文字の書き込みは幅だけ変わり、文字を折り返して高さを決める。
+        """
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        if annot.type[0] not in RESIZABLE_TYPES:
+            raise ValueError(f"{ANNOT_KINDS.get(annot.type[0], 'この注釈')}は大きさを変えられません。")
+        new = fitz.Rect(rect).normalize()
+        if new.width < MIN_ANNOT_SIZE or new.height < MIN_ANNOT_SIZE:
+            new = fitz.Rect(new.x0, new.y0, max(new.x1, new.x0 + MIN_ANNOT_SIZE), max(new.y1, new.y0 + MIN_ANNOT_SIZE))
+        del annot, page
+        return self._transform_annot(index, xref, new, resize=True)
+
+    def _transform_annot(self, index: int, xref: int, new_disp: fitz.Rect, resize: bool = False) -> int:
+        """注釈の外枠（表示座標）を new_disp に移す。種類ごとに、枠の設定・座標の作り直しを使い分ける。"""
+        doc = self._require()
+        page = doc[index]
+        annot = self._find_annot(page, xref)
+        t = annot.type[0]
+        rot, der = page.rotation_matrix, page.derotation_matrix
+        old_disp = (annot.rect * rot).normalize()
         self._push_undo()
-        disp = (annot.rect * page.rotation_matrix).normalize() + (dx, dy, dx, dy)
-        annot.set_rect((disp * page.derotation_matrix).normalize())
-        if annot.type[0] == fitz.PDF_ANNOT_FREE_TEXT:
+        self.modified = True
+        if t == fitz.PDF_ANNOT_FREE_TEXT and _ppe(doc, xref) is not None:
+            del annot, page
+            return self._rebuild_text_box(index, xref, top_left=new_disp.tl, wrap_width=new_disp.width if resize else None)
+        if t in (fitz.PDF_ANNOT_INK, fitz.PDF_ANNOT_LINE):
+            verts = annot.vertices or []
+            flat = [fitz.Point(*p) * rot for p in (verts if t == fitz.PDF_ANNOT_LINE else [q for s_ in verts for q in s_])]
+            # 外枠は線の太さぶん広い。線そのものの範囲 (gb) を、新しい外枠から同じ余白を引いた範囲 (tg) に写す
+            gb = fitz.Rect(min(q.x for q in flat), min(q.y for q in flat), max(q.x for q in flat), max(q.y for q in flat))
+            tg = fitz.Rect(new_disp.x0 + (gb.x0 - old_disp.x0), new_disp.y0 + (gb.y0 - old_disp.y0),
+                           new_disp.x1 - (old_disp.x1 - gb.x1), new_disp.y1 - (old_disp.y1 - gb.y1))
+            sx = tg.width / gb.width if gb.width > 0.01 and tg.width > 0 else 1.0
+            sy = tg.height / gb.height if gb.height > 0.01 and tg.height > 0 else 1.0
+
+            def tr(p):
+                q = fitz.Point(*p) * rot
+                q = fitz.Point(tg.x0 + (q.x - gb.x0) * sx, tg.y0 + (q.y - gb.y0) * sy)
+                return tuple(q * der)
+
+            colors = annot.colors
+            stroke = tuple((colors.get("stroke") or (0, 0, 0))[:3])
+            width = float(annot.border.get("width", 1.0) or 1.0)
+            opacity = annot.opacity if annot.opacity is not None and annot.opacity >= 0 else 1.0
+            info = annot.info
+            title, content = info.get("title", ""), info.get("content", "")
+            ends = annot.line_ends if t == fitz.PDF_ANNOT_LINE else None
+            page.delete_annot(annot)
+            del annot
+            if t == fitz.PDF_ANNOT_INK:
+                new = self._make_ink(page, [[tr(p) for p in s] for s in verts], stroke, width, opacity, title, content)
+            else:
+                new = self._make_line(page, [tr(verts[0]), tr(verts[-1])], ends or (0, 0), stroke, width, opacity, title, content)
+            return new.xref
+        # 四角・丸は線の太さぶん外枠が広がっている（/RD）。その分を引いた枠を設定する
+        target = (new_disp * der).normalize()
+        if t in (fitz.PDF_ANNOT_SQUARE, fitz.PDF_ANNOT_CIRCLE):
+            rd = _rect_diff(doc, xref)
+            target = fitz.Rect(target.x0 + rd[0], target.y0 + rd[1], target.x1 - rd[2], target.y1 - rd[3])
+            if target.width < 1 or target.height < 1:
+                target = (new_disp * der).normalize()
+        annot.set_rect(target)
+        if t == fitz.PDF_ANNOT_FREE_TEXT:
             col, size = _parse_da(doc.xref_get_key(xref, "DA")[1])
             annot.update(fontname="japan", fontsize=size, text_color=col)
         else:
             annot.update()
-        self.modified = True
+        return xref
 
     def remove_annot(self, index: int, xref: int) -> None:
         doc = self._require()
@@ -571,7 +855,7 @@ class PdfModel:
 
     # ------------------------------------------------------------ 保存
     def save(self, path: str | None = None) -> str:
-        doc = self._require()
+        self._require()
         target = path or self.path
         if not target:
             raise ValueError("保存先が指定されていません。")
@@ -581,12 +865,20 @@ class PdfModel:
         return target
 
     def _output_bytes(self) -> bytes:
-        """保存用のバイト列。パスワード付きで開いた（または設定した）文書は同じパスワードで暗号化し直す。"""
+        """保存用のバイト列。パスワード付きで開いた（または設定した）文書は同じパスワードで暗号化し直す。
+
+        不要なオブジェクトを取り除く保存（garbage）は、開いている文書の中のオブジェクト番号を振り直してしまう。
+        押印や書き込みを番号で覚えているので、開いている文書には触らず、複製を作ってそこから書き出す。
+        """
         doc = self._require()
-        if self.password:
-            return doc.tobytes(garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_AES_256,
-                               user_pw=self.password, owner_pw=self.password, permissions=self.permissions)
-        return doc.tobytes(garbage=3, deflate=True)
+        copy = fitz.open(stream=doc.tobytes(garbage=0, deflate=False, encryption=fitz.PDF_ENCRYPT_NONE), filetype="pdf")
+        try:
+            if self.password:
+                return copy.tobytes(garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_AES_256,
+                                    user_pw=self.password, owner_pw=self.password, permissions=self.permissions)
+            return copy.tobytes(garbage=3, deflate=True, encryption=fitz.PDF_ENCRYPT_NONE)
+        finally:
+            copy.close()
 
     # ------------------------------------------------------------ 描画
     def render(self, index: int, scale: float = 1.0, max_width: int | None = None):
@@ -625,6 +917,31 @@ def _open_bytes(data: bytes, path: str, password: str | None) -> fitz.Document:
             doc.close()
             raise PasswordRequired(path, wrong=bool(password))
     return doc
+
+
+def _ppe(doc: fitz.Document, xref: int) -> dict | None:
+    """このアプリで書いたテキストボックスの設定（注釈の /PPE キーに JSON で保存）。無ければ None。"""
+    try:
+        kind, value = doc.xref_get_key(xref, "PPE")
+        if kind != "string":
+            return None
+        spec = json.loads(value)
+        return spec if isinstance(spec, dict) else None
+    except Exception:
+        return None
+
+
+def _rect_diff(doc: fitz.Document, xref: int) -> tuple[float, float, float, float]:
+    """四角・丸の /RD（外枠と図形の差。左 上 右 下 ではなく PDF の並びだが 4 辺同じ値で書かれる）。"""
+    try:
+        kind, value = doc.xref_get_key(xref, "RD")
+        if kind == "array":
+            v = [float(x) for x in value.strip("[]").split()]
+            if len(v) == 4:
+                return v[0], v[1], v[2], v[3]
+    except Exception:
+        pass
+    return 0.0, 0.0, 0.0, 0.0
 
 
 def _parse_da(da: str) -> tuple[tuple[float, float, float], float]:
