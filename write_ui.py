@@ -7,7 +7,8 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QGridLayout, QLabel, QToolButton, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QGridLayout, QLabel, QMenu, QToolButton,
+                               QWidget)
 
 import fonts
 import ribbon
@@ -32,7 +33,12 @@ COLORS = [
 ]
 WIDTHS = [("細い", 1.0), ("ふつう", 2.0), ("太い", 4.0), ("極太", 8.0), ("マーカー", 14.0)]
 OPACITIES = [("100%", 1.0), ("75%", 0.75), ("50%", 0.5), ("25%", 0.25)]
-TEXT_BGS = [("なし", None), ("白", (1.0, 1.0, 1.0)), ("黄", (1.0, 1.0, 0.8))]
+TEXT_BGS = [("なし", None), ("白", (1.0, 1.0, 1.0)), ("薄い黄", (1.0, 1.0, 0.8)), ("薄い青", (0.86, 0.93, 1.0)),
+            ("薄い緑", (0.87, 0.96, 0.86)), ("薄い桃", (1.0, 0.88, 0.90)), ("薄い灰", (0.92, 0.92, 0.92))]     # 文字の背景（既定は なし）
+BORDER_COLORS = [("なし", None), ("黒", (0.0, 0.0, 0.0)), ("赤", (0.85, 0.10, 0.10)), ("青", (0.10, 0.30, 0.85)),
+                 ("緑", (0.0, 0.55, 0.20)), ("橙", (1.0, 0.50, 0.0)), ("灰", (0.5, 0.5, 0.5))]                 # 文字の枠（既定は なし）
+BORDER_STYLE_ITEMS = [("1本線", "solid"), ("点線", "dotted"), ("2重線", "double")]
+BORDER_WIDTHS = [("細い", 0.5), ("ふつう", 1.0), ("太い", 2.0), ("極太", 3.0)]
 
 
 def _qcolor(c) -> QColor:
@@ -112,11 +118,89 @@ def _swatch_icon(color, size: int = 18) -> QIcon:
     return QIcon(pm)
 
 
+def _none_icon(size: int = 18) -> QIcon:
+    """「色なし」の見本（白地に赤い斜線）。"""
+    pm = QPixmap(size, size)
+    pm.fill(Qt.transparent)
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(QPen(QColor(90, 90, 90), 1)); p.setBrush(QColor(255, 255, 255))
+    p.drawRect(1, 1, size - 3, size - 3)
+    p.setPen(QPen(QColor(210, 40, 40), 1.6)); p.drawLine(QPointF(2.5, size - 3.5), QPointF(size - 3.5, 2.5))
+    p.end()
+    return QIcon(pm)
+
+
+class ColorMenuButton(QToolButton):
+    """色を一覧から選ぶボタン（なし / 決まった色 / 他の色…）。今の色を見本と名前で表示する。"""
+
+    color_changed = Signal()
+
+    def __init__(self, choices: list, title: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.setObjectName("ribbonSmall")
+        self.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.setIconSize(QSize(14, 14))
+        self.setAutoRaise(True)
+        self.setFocusPolicy(Qt.NoFocus)
+        self.setPopupMode(QToolButton.InstantPopup)
+        self.ask_color = None                 # 「他の色」のダイアログ（テストで差し替える）。None なら QColorDialog
+        self._choices = list(choices)
+        self._title = title
+        self._color = None
+        menu = QMenu(self)
+        menu.setObjectName("ribbonMenu")
+        self.choice_actions: dict[str, QAction] = {}
+        for label, col in self._choices:
+            a = menu.addAction(_none_icon() if col is None else _swatch_icon(col), label)
+            a.triggered.connect(lambda _=False, c=col: self.choose(c))
+            self.choice_actions[label] = a
+        menu.addSeparator()
+        self.a_other = menu.addAction(ribbon.icon("color"), "他の色...")
+        self.a_other.triggered.connect(self._pick_other)
+        self.setMenu(menu)
+        self._refresh()
+
+    def color(self):
+        """今の色 (r, g, b)。「なし」は None。"""
+        return self._color
+
+    def set_color(self, color):
+        """表示だけを変える（変更の通知は出さない）。"""
+        self._color = None if color is None else tuple(float(c) for c in color[:3])
+        self._refresh()
+
+    def choose(self, color):
+        """色を選ぶ（一覧から選んだときと同じ。変更を通知する）。"""
+        self.set_color(color)
+        self.color_changed.emit()
+
+    def _label(self) -> str:
+        for label, col in self._choices:
+            if (col is None) == (self._color is None) and (col is None or all(abs(a - b) < 0.02 for a, b in zip(col, self._color))):
+                return label
+        return "他の色"
+
+    def _refresh(self):
+        self.setIcon(_none_icon() if self._color is None else _swatch_icon(self._color))
+        self.setText(self._label())
+
+    def _pick_other(self):
+        initial = _qcolor(self._color) if self._color is not None else QColor(255, 255, 255)
+        if self.ask_color is not None:
+            c = self.ask_color(initial, self._title)
+        else:
+            c = QColorDialog.getColor(initial, self, self._title)
+            c = c if c.isValid() else None
+        if c is not None:
+            self.choose((c.redF(), c.greenF(), c.blueF()))
+
+
 class WriteRibbon(ribbon.RibbonPage):
     """「書き込み」タブの中身。道具 / マーカー / 色 / 線（または文字）の設定をグループに分けて並べる。"""
 
     tool_changed = Signal(str)        # 選んだ道具
-    style_changed = Signal(str)       # 変わった設定: color / width / opacity / fill / font / fontsize / textbg / border
+    style_changed = Signal(str)       # 変わった設定: color / width / opacity / fill / font / fontsize / textbg / border / borderstyle / borderwidth
     markup_requested = Signal(str)    # highlight / underline / strikeout
 
     def __init__(self, parent=None):
@@ -230,19 +314,43 @@ class WriteRibbon(ribbon.RibbonPage):
         self.sp_size.setKeyboardTracking(False)
         self.sp_size.setToolTip("文字の大きさ")
         self.sp_size.valueChanged.connect(lambda _: self._emit("fontsize"))
-        self.cb_bg = QComboBox(box)
-        for label, c in TEXT_BGS:
-            self.cb_bg.addItem(label, c)
-        self.cb_bg.setToolTip("文字の後ろを塗る色。「白」にすると下の文字を隠して上書きしたように見せられる")
-        self.cb_bg.currentIndexChanged.connect(lambda _: self._emit("textbg"))
-        self.chk_border = QCheckBox("枠", box)
-        self.chk_border.setToolTip("文字のまわりを線で囲む")
-        self.chk_border.toggled.connect(lambda _: self._emit("border"))
-        grid.addWidget(field("フォント", box), 0, 0); grid.addWidget(self.cb_font, 0, 1, 1, 3)
-        grid.addWidget(field("大きさ", box), 1, 0); grid.addWidget(self.sp_size, 1, 1)
-        grid.addWidget(field("背景", box), 2, 0); grid.addWidget(self.cb_bg, 2, 1)
-        grid.addWidget(self.chk_border, 2, 2)
+        grid.addWidget(field("フォント", box), 0, 0); grid.addWidget(self.cb_font, 0, 1)
+        grid.addWidget(field("大きさ", box), 1, 0); grid.addWidget(self.sp_size, 1, 1, Qt.AlignLeft)
+        grid.setRowStretch(2, 1)
         self.text_group.add_widget(box)
+
+        # ---- 文字の背景と枠（どちらも最初は「なし」）
+        self.box_group = self.add_group("背景と枠")
+        box = QWidget(self.box_group)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(4, 1, 4, 0)
+        grid.setHorizontalSpacing(6); grid.setVerticalSpacing(1)
+        self.btn_bg = ColorMenuButton(TEXT_BGS, "背景の色を選ぶ", box)
+        self.btn_bg.setToolTip("文字の後ろを塗る色。「白」にすると下の文字を隠して上書きしたように見せられる")
+        self.btn_bg.color_changed.connect(lambda: self._emit("textbg"))
+        self.btn_border = ColorMenuButton(BORDER_COLORS, "枠の色を選ぶ", box)
+        self.btn_border.setToolTip("文字のまわりを囲む線の色。「なし」で枠を消す")
+        self.btn_border.color_changed.connect(self._on_border_color)
+        self.cb_border_style = QComboBox(box)
+        for label, key in BORDER_STYLE_ITEMS:
+            self.cb_border_style.addItem(label, key)
+        self.cb_border_style.setToolTip("枠の線の種類（1 本線 / 点線 / 2 重線）")
+        self.cb_border_style.currentIndexChanged.connect(lambda _: self._emit("borderstyle"))
+        self.cb_border_width = QComboBox(box)
+        for label, w in BORDER_WIDTHS:
+            self.cb_border_width.addItem(label, w)
+        self.cb_border_width.setCurrentIndex(1)
+        self.cb_border_width.setToolTip("枠の線の太さ")
+        self.cb_border_width.currentIndexChanged.connect(lambda _: self._emit("borderwidth"))
+        for b in (self.btn_bg, self.btn_border):
+            b.ask_color = lambda initial, title: self.ask_color(initial, title) if self.ask_color is not None else self._ask_qt(initial, title)
+        grid.addWidget(field("背景", box), 0, 0); grid.addWidget(self.btn_bg, 0, 1)
+        grid.addWidget(field("枠", box), 1, 0); grid.addWidget(self.btn_border, 1, 1)
+        grid.addWidget(field("枠の線", box), 0, 2); grid.addWidget(self.cb_border_style, 0, 3)
+        grid.addWidget(field("枠の太さ", box), 1, 2); grid.addWidget(self.cb_border_width, 1, 3)
+        grid.setRowStretch(2, 1)
+        self.box_group.add_widget(box)
+        self._sync_border_enabled()
 
         self.set_color(self._color)
         self.set_context("shape")
@@ -278,6 +386,7 @@ class WriteRibbon(ribbon.RibbonPage):
         """kind="text" なら文字の設定、"shape" なら線の設定を表示する。"""
         self._context = "text" if kind == "text" else "shape"
         self.set_group_visible(self.text_group, self._context == "text")
+        self.set_group_visible(self.box_group, self._context == "text")
         self.set_group_visible(self.line_group, self._context != "text")
 
     def context(self) -> str:
@@ -325,10 +434,32 @@ class WriteRibbon(ribbon.RibbonPage):
         return float(self.sp_size.value())
 
     def text_bg(self):
-        return self.cb_bg.currentData()
+        """文字の背景の色。なしは None。"""
+        return self.btn_bg.color()
 
-    def text_border(self) -> bool:
-        return self.chk_border.isChecked()
+    def text_border(self):
+        """文字の枠の色。枠なしは None。"""
+        return self.btn_border.color()
+
+    def text_border_style(self) -> str:
+        return self.cb_border_style.currentData() or "solid"
+
+    def text_border_width(self) -> float:
+        return float(self.cb_border_width.currentData() or 1.0)
+
+    def _on_border_color(self):
+        self._sync_border_enabled()
+        self._emit("border")
+
+    def _sync_border_enabled(self):
+        """枠が「なし」のあいだは、線の種類と太さは選べなくする。"""
+        on = self.btn_border.color() is not None
+        self.cb_border_style.setEnabled(on)
+        self.cb_border_width.setEnabled(on)
+
+    def _ask_qt(self, initial, title):
+        c = QColorDialog.getColor(initial, self, title)
+        return c if c.isValid() else None
 
     def _emit(self, what: str):
         if not self._mute:
@@ -368,11 +499,12 @@ class WriteRibbon(ribbon.RibbonPage):
                     i = self.cb_font.findData(annot["font"])
                     if i >= 0:
                         self.cb_font.setCurrentIndex(i)
-                    fill = annot.get("fill")
-                    j = next((k for k, (_l, c) in enumerate(TEXT_BGS) if (c is None) == (fill is None)
-                              and (c is None or all(abs(a - b) < 0.02 for a, b in zip(c, fill)))), 0)
-                    self.cb_bg.setCurrentIndex(j)
-                    self.chk_border.setChecked(bool(annot.get("border")))
+                    self.btn_bg.set_color(annot.get("fill"))
+                    self.btn_border.set_color(annot.get("border_color"))
+                    i = self.cb_border_style.findData(annot.get("border_style") or "solid")
+                    self.cb_border_style.setCurrentIndex(i if i >= 0 else 0)
+                    self.cb_border_width.setCurrentIndex(self._nearest(self.cb_border_width, float(annot.get("border_width") or 1.0)))
+                    self._sync_border_enabled()
             else:
                 self.cb_width.setCurrentIndex(self._nearest(self.cb_width, float(annot.get("width") or 1.0)))
                 self.cb_opacity.setCurrentIndex(self._nearest(self.cb_opacity, float(annot.get("opacity") or 1.0)))

@@ -253,8 +253,9 @@ shot(win, "07_write.png",
 shot(win, "07b_ribbon_shape.png", crop=rib_crop(win, 4))
 # 7c. リボンの拡大（文字の設定）
 rb.tool_actions["text"].trigger(); QTest.qWait(200)
-rb.sp_size.setValue(14); rb.cb_bg.setCurrentIndex(2); rb.chk_border.setChecked(True); rb.cb_font.setCurrentIndex(rb.cb_font.count() - 1); QTest.qWait(150)
-shot(win, "07c_ribbon_text.png", callouts=[(*right_of(win, rb.cb_font), 1), (*right_of(win, rb.sp_size), 2), (*right_of(win, rb.chk_border, 26), 3)],
+rb.sp_size.setValue(14); rb.btn_bg.set_color((1.0, 1.0, 0.8)); rb.btn_border.set_color((0.85, 0.10, 0.10)); rb._sync_border_enabled()
+rb.cb_font.setCurrentIndex(rb.cb_font.count() - 1); QTest.qWait(150)
+shot(win, "07c_ribbon_text.png", callouts=[(*right_of(win, rb.cb_font), 1), (*right_of(win, rb.sp_size), 2), (*title_of(win, rb.box_group), 3)],
      crop=rib_crop(win, 4))
 # 7d. 選択したところ（枠と右下のつまみ）
 rb.tool_actions["select"].trigger(); QTest.qWait(150)

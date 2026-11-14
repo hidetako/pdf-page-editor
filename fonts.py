@@ -16,6 +16,20 @@ import pymupdf as fitz
 BUILTIN = "builtin"
 PAD = 3.0            # テキストボックスの内側の余白 (pt)
 MAX_SUBSET_BYTES = 600_000   # 1 つのテキストボックスがこれより大きくなるフォントは使わない
+BORDER_STYLES = ("solid", "dotted", "double")     # 枠の線: 1 本線 / 点線 / 2 重線
+
+
+def border_thickness(border, border_width: float = 1.0, border_style: str = "solid") -> float:
+    """枠が占める厚み (pt)。2 重線は「線・すき間・線」で太さの 3 倍。枠なしは 0。"""
+    if border is None or border_width <= 0:
+        return 0.0
+    return border_width * (3.0 if border_style == "double" else 1.0)
+
+
+def box_pad(border=None, border_width: float = 1.0, border_style: str = "solid") -> float:
+    """テキストボックスの内側の余白 (pt)。太い枠・2 重線のときは、枠が文字に重ならないよう広げる
+    （1 pt までの枠は従来どおり PAD の中に収める）。"""
+    return PAD + max(0.0, border_thickness(border, border_width, border_style) - 1.0)
 
 # (キー, 表示名, 候補ファイル名)。Windows の標準フォントのうち TrueType 形式のゴシック系
 _CANDIDATES: list[tuple[str, str, tuple[str, ...]]] = [
@@ -193,49 +207,71 @@ def _html(text: str) -> str:
 
 
 def measure(text: str, key: str, fontsize: float, wrap_width: float | None = None,
-            max_width: float = 2000.0) -> tuple[float, float]:
-    """テキストボックスの (幅, 高さ) pt。wrap_width 指定時はその幅で折り返したときの高さを返す。"""
-    return _measure(text, resolve(key), fontsize, wrap_width, max_width)
+            max_width: float = 2000.0, pad: float = PAD) -> tuple[float, float]:
+    """テキストボックスの (幅, 高さ) pt。wrap_width 指定時はその幅で折り返したときの高さを返す。
+    pad は内側の余白（太い枠のときは box_pad() で求めた値を渡す）。"""
+    return _measure(text, resolve(key), fontsize, wrap_width, max_width, pad)
 
 
-def _measure(text: str, key: str, fontsize: float, wrap_width: float | None, max_width: float) -> tuple[float, float]:
+def _measure(text: str, key: str, fontsize: float, wrap_width: float | None, max_width: float,
+             pad: float = PAD) -> tuple[float, float]:
     if wrap_width is None:
         f = _font(key)
         natural = max((f.text_length(ln, fontsize) for ln in text.split("\n")), default=0.0)
-        width = min(max_width, natural + 2 * PAD + 2.0)
+        width = min(max_width, natural + 2 * pad + 2.0)
     else:
         width = wrap_width
-    width = max(width, fontsize + 2 * PAD)
+    width = max(width, fontsize + 2 * pad)
     css, arch = _css(key, fontsize, (0, 0, 0))
     story = fitz.Story(html=_html(text), user_css=css, archive=arch)
-    _more, filled = story.place(fitz.Rect(0, 0, width - 2 * PAD, 100000))
-    height = max(fitz.Rect(filled).height, fontsize * 1.2) + 2 * PAD
+    _more, filled = story.place(fitz.Rect(0, 0, width - 2 * pad, 100000))
+    height = max(fitz.Rect(filled).height, fontsize * 1.2) + 2 * pad
     return width, height
 
 
 def render_text_pdf(text: str, key: str, fontsize: float, color: tuple[float, float, float],
                     wrap_width: float | None = None, fill: tuple[float, float, float] | None = None,
                     border: tuple[float, float, float] | None = None, border_width: float = 1.0,
-                    rotation: int = 0, max_width: float = 2000.0) -> tuple[fitz.Document, float, float]:
+                    rotation: int = 0, max_width: float = 2000.0, border_style: str = "solid") -> tuple[fitz.Document, float, float]:
     """テキストボックス 1 つぶんの小さな PDF を作る。戻り値は (PDF, 幅, 高さ)。幅・高さは回転前の表示上の大きさ。
 
+    fill は背景の色、border は枠の色（None なら無し）。border_style は "solid"（1 本線）/ "dotted"（点線）/ "double"（2 重線）。
     フォントは使った文字だけに絞って埋め込む。rotation（ページの回転）が 0 以外のときは、
     回転したページの上で正立して見えるよう、あらかじめ逆向きに回した PDF を返す。
     """
-    return _render(text, resolve(key), fontsize, color, wrap_width, fill, border, border_width, rotation, max_width)
+    return _render(text, resolve(key), fontsize, color, wrap_width, fill, border, border_width, rotation, max_width, border_style)
+
+
+def _draw_box(page, fill, border, border_width: float, border_style: str) -> None:
+    """背景と枠を描く。枠はボックスの内側に収める。"""
+    r = page.rect
+    if fill is not None:
+        page.draw_rect(r, color=None, fill=fill, width=0)
+    if border is None or border_width <= 0:
+        return
+    w = border_width
+    if border_style == "double":
+        for inset in (w / 2, w * 2.5):               # 外側の線と内側の線（あいだに線 1 本ぶんのすき間）
+            page.draw_rect(r + (inset, inset, -inset, -inset), color=border, width=w)
+    elif border_style == "dotted":
+        dash, gap = (w, w * 2) if w >= 1 else (1.0, 1.5)      # 細い線は、点が小さくなりすぎないようにする
+        page.draw_rect(r + (w / 2, w / 2, -w / 2, -w / 2), color=border, width=w, dashes=f"[{dash:g} {gap:g}] 0")
+    else:
+        page.draw_rect(r + (w / 2, w / 2, -w / 2, -w / 2), color=border, width=w)
 
 
 def _render(text: str, key: str, fontsize: float, color, wrap_width=None, fill=None, border=None,
-            border_width: float = 1.0, rotation: int = 0, max_width: float = 2000.0) -> tuple[fitz.Document, float, float]:
-    w, h = _measure(text, key, fontsize, wrap_width, max_width)
+            border_width: float = 1.0, rotation: int = 0, max_width: float = 2000.0,
+            border_style: str = "solid") -> tuple[fitz.Document, float, float]:
+    if border_style not in BORDER_STYLES:
+        border_style = "solid"
+    pad = box_pad(border, border_width, border_style)
+    w, h = _measure(text, key, fontsize, wrap_width, max_width, pad)
     css, arch = _css(key, fontsize, color)
     tmp = fitz.open()
     page = tmp.new_page(width=w, height=h)
-    if fill is not None or border is not None:
-        half = border_width / 2 if border is not None else 0
-        page.draw_rect(page.rect + (half, half, -half, -half), color=border, fill=fill,
-                       width=border_width if border is not None else 0)
-    page.insert_htmlbox(page.rect + (PAD, PAD, -PAD, -PAD), _html(text), css=css, archive=arch, scale_low=1)
+    _draw_box(page, fill, border, border_width, border_style)
+    page.insert_htmlbox(page.rect + (pad, pad, -pad, -pad), _html(text), css=css, archive=arch, scale_low=1)
     tmp.subset_fonts()
     if rotation % 360:
         rot = rotation % 360

@@ -29,7 +29,7 @@ import fonts
 import ribbon
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.6.0"
+__version__ = "1.6.1"
 
 
 def resource_path(rel: str) -> str:
@@ -1277,6 +1277,12 @@ class MainWindow(QMainWindow):
                     kw["fill"] = rb.text_bg()
                 elif what == "border":
                     kw["border"] = rb.text_border()
+                    kw["border_style"] = rb.text_border_style()     # 枠を付けた瞬間に、リボンで選んでいる線と太さにする
+                    kw["border_width"] = rb.text_border_width()
+                elif what == "borderstyle" and info["border"]:
+                    kw["border_style"] = rb.text_border_style()
+                elif what == "borderwidth" and info["border"]:
+                    kw["border_width"] = rb.text_border_width()
         else:
             shape = t in (fitz.PDF_ANNOT_SQUARE, fitz.PDF_ANNOT_CIRCLE)
             if what == "color":
@@ -1912,6 +1918,7 @@ class MainWindow(QMainWindow):
         try:
             xref = self.model.add_text_box(index, pt, text.strip("\n"), font=rb.font_key(), fontsize=rb.fontsize(),
                                            color=rb.color(), fill=rb.text_bg(), border=rb.text_border(),
+                                           border_style=rb.text_border_style(), border_width=rb.text_border_width(),
                                            title=os.environ.get("USERNAME") or os.environ.get("USER") or "")
         except Exception as e:
             self._error(e)
