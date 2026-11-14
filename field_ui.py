@@ -17,6 +17,12 @@ def _date_format_items(today: _dt.date | None = None) -> list[tuple[str, str]]:
     return [(fields.format_date(d, key), key) for key in fields.DATE_FORMATS]
 
 
+def history_label(text: str, width: int = 34) -> str:
+    """履歴の一覧に出す 1 行の見出し（複数行の内容は「 / 」でつなぎ、長ければ省略する）。"""
+    one = " / ".join(ln.strip() for ln in text.splitlines() if ln.strip())
+    return one if len(one) <= width else one[:width - 1] + "…"
+
+
 class RulesDialog(QDialog):
     """ルールの管理: 追加・名前や種類の変更・削除。OK を押すまで、もとのルールは変えない。"""
 
@@ -54,6 +60,14 @@ class RulesDialog(QDialog):
         self.sp_offset.setToolTip("0 は今日。1 は明日、7 は 1 週間後、-1 は昨日")
         self.ed_value = QPlainTextEdit(self)
         self.ed_value.setTabChangesFocus(True)
+        self.cb_history = QComboBox(self)
+        self.cb_history.setToolTip("これまでに使った内容。選ぶと「入れる文字」に入ります")
+        self.cb_history.activated.connect(self._pick_history)
+        self.btn_clear_history = QPushButton("履歴を消す", self)
+        self.btn_clear_history.clicked.connect(self._clear_history)
+        self.history_row = QWidget(self)
+        hl = QHBoxLayout(self.history_row); hl.setContentsMargins(0, 0, 0, 0)
+        hl.addWidget(self.cb_history, 1); hl.addWidget(self.btn_clear_history)
         self.chk_remember = QCheckBox("前回入力した内容を覚えておく", self)
         self.lbl_value = QLabel("入れる文字", self)
         self.lbl_hint = QLabel("", self)
@@ -65,6 +79,7 @@ class RulesDialog(QDialog):
         self.form.addRow("日付の書式", self.cb_fmt)
         self.form.addRow("いつの日付", self.sp_offset)
         self.form.addRow(self.lbl_value, self.ed_value)
+        self.form.addRow("履歴から選ぶ", self.history_row)
         self.form.addRow("", self.chk_remember)
         right = QVBoxLayout()
         right.addLayout(self.form)
@@ -116,7 +131,7 @@ class RulesDialog(QDialog):
 
     def delete_rule(self):
         i = self.list.currentRow()
-        if 0 <= i < len(self.rules):
+        if 0 <= i < len(self.rules) and len(self.rules) > 1:
             del self.rules[i]
             self._fill_list()
             self.list.setCurrentRow(min(i, len(self.rules) - 1))
@@ -128,8 +143,9 @@ class RulesDialog(QDialog):
             return
         rule = self.current_rule()
         self._loading = True
-        for w in (self.ed_name, self.cb_kind, self.cb_fmt, self.sp_offset, self.ed_value, self.chk_remember, self.btn_del):
+        for w in (self.ed_name, self.cb_kind, self.cb_fmt, self.sp_offset, self.ed_value, self.chk_remember):
             w.setEnabled(rule is not None)
+        self.btn_del.setEnabled(rule is not None and len(self.rules) > 1)      # 最後の 1 つは消せない（ルールが無いと枠を置けない）
         if rule is not None:
             self.ed_name.setText(rule.name)
             self.cb_kind.setCurrentIndex(max(0, self.cb_kind.findData(rule.kind)))
@@ -138,6 +154,7 @@ class RulesDialog(QDialog):
             self.ed_value.setPlainText(rule.value)
             self.chk_remember.setChecked(rule.remember)
         self._loading = False
+        self._fill_history()
         self._show_for_kind()
 
     def _on_kind(self, _i: int):
@@ -150,12 +167,34 @@ class RulesDialog(QDialog):
         self.form.setRowVisible(self.sp_offset, kind == "date")
         self.form.setRowVisible(self.ed_value, kind != "date")
         self.form.setRowVisible(self.chk_remember, kind == "ask")
+        rule = self.current_rule()
+        self.form.setRowVisible(self.history_row, kind == "fixed" and rule is not None and bool(rule.history))
         self.lbl_value.setText("入れる文字" if kind == "fixed" else "最初に入れておく文字")
         self.lbl_hint.setText({
             "date": "PDF を開いたとき・印刷するときに、その日の日付に自動で変わります。",
             "fixed": "送付元・住所・電話番号のように、毎回同じ内容を入れます。差し替え印刷の画面で直すと、次回からその内容になります。",
             "ask": "宛先・件名・枚数のように、印刷のたびに入力します。",
         }.get(kind, ""))
+
+    def _fill_history(self):
+        rule = self.current_rule()
+        self.cb_history.clear()
+        self.cb_history.addItem("（選んでください）", None)
+        for h in (rule.history if rule is not None else []):
+            self.cb_history.addItem(history_label(h), h)
+
+    def _pick_history(self, i: int):
+        text = self.cb_history.itemData(i)
+        if text:
+            self.ed_value.setPlainText(text)
+        self.cb_history.setCurrentIndex(0)
+
+    def _clear_history(self):
+        rule = self.current_rule()
+        if rule is not None:
+            rule.history = []
+            self._fill_history()
+            self._show_for_kind()
 
     def _store(self, *_):
         if self._loading:
@@ -175,7 +214,7 @@ class RulesDialog(QDialog):
 
     def accept(self):
         self._store()
-        self.book.rules = [r.normalized() for r in self.rules]
+        self.book.set_rules(self.rules)            # 全部消されたときは、最初のルールに戻る
         self.book.save()
         super().accept()
 
@@ -193,6 +232,7 @@ class FillDialog(QDialog):
         self.resize(520, min(640, 190 + 74 * len(rows)))
         self.action: str | None = None
         self.editors: dict[str, QWidget] = {}
+        self.history_boxes: dict[str, QComboBox] = {}       # 決まった文字の「履歴から選ぶ」（履歴があるルールだけ）
         head = QLabel("枠に入れる内容を確かめてください。空のままの枠には、何も印刷しません。\n"
                       "ここで入れた内容は印刷にだけ使い、開いている PDF は書き換えません。", self)
         head.setWordWrap(True)
@@ -214,7 +254,22 @@ class FillDialog(QDialog):
             note = {"date": "自動", "fixed": "毎回同じ", "ask": "毎回入力"}.get(rule.kind, "")
             label = QLabel(f"{rule.name}\n<span style='color:#808080'>{note}</span>".replace("\n", "<br>"), inner)
             label.setTextFormat(Qt.RichText)
-            form.addRow(label, ed)
+            others = [h for h in rule.history if h != value] if rule.kind == "fixed" else []
+            if others:
+                # 過去に使った内容から選び直せる（例: 送付元を別の部署・担当者に切り替える）
+                cell = QWidget(inner)
+                cl = QVBoxLayout(cell); cl.setContentsMargins(0, 0, 0, 0); cl.setSpacing(2)
+                box = QComboBox(cell)
+                box.addItem("履歴から選ぶ…", None)
+                for h in rule.history:
+                    box.addItem(history_label(h), h)
+                box.setToolTip("これまでに使った内容。選ぶと下の欄に入ります（選んだ内容が次回からの内容になります）")
+                box.activated.connect(lambda i, b=box, e=ed: self._pick_history(b, e, i))
+                cl.addWidget(box); cl.addWidget(ed)
+                self.history_boxes[rule.id] = box
+                form.addRow(label, cell)
+            else:
+                form.addRow(label, ed)
             self.editors[rule.id] = ed
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -237,6 +292,17 @@ class FillDialog(QDialog):
         outer.addLayout(buttons)
         first = next((ed for (rule, value), ed in zip(rows, self.editors.values()) if rule.kind != "date" and not value), None)
         (first or self.btn_print).setFocus()
+
+    def _pick_history(self, box: QComboBox, ed: QWidget, i: int):
+        text = box.itemData(i)
+        if text:
+            ed.setPlainText(text)
+        box.setCurrentIndex(0)
+
+    def choose_history(self, rule_id: str, index: int):
+        """履歴の index 番目（0 がいちばん新しい）を選ぶ。"""
+        box = self.history_boxes[rule_id]
+        self._pick_history(box, self.editors[rule_id], index + 1)
 
     def _finish(self, action: str):
         self.action = action

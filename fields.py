@@ -15,13 +15,15 @@ import datetime as _dt
 import json
 import os
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 KINDS = ("date", "fixed", "ask")
 KIND_LABELS = {"date": "日付（自動で今日の日付）", "fixed": "決まった文字（毎回同じ）", "ask": "毎回入力する"}
 WEEKDAYS = "月火水木金土日"
 
 # (キー, 表示例の作り方)。表示例は format_date で作る
+HISTORY_MAX = 12             # 決まった文字の履歴を、ルールごとに何件まで覚えるか
+
 DATE_FORMATS = ("ymd", "ymd_w", "wareki", "wareki_w", "slash", "md", "wareki_short")
 DEFAULT_DATE_FORMAT = "ymd"
 
@@ -61,6 +63,14 @@ class Rule:
     fmt: str = DEFAULT_DATE_FORMAT   # date: 書式
     offset: int = 0              # date: 何日後（マイナスは何日前）
     remember: bool = False       # ask: 前回入力した内容を覚えておく
+    history: list = field(default_factory=list)   # fixed: これまでに使った内容（新しい順）。差し替え印刷の画面で選び直せる
+
+    def push_history(self, value: str) -> None:
+        """使った内容を履歴の先頭に入れる（同じ内容は 1 つにまとめ、古いものから捨てる）。空は入れない。"""
+        value = str(value or "").strip()
+        if not value:
+            return
+        self.history = ([value] + [h for h in self.history if h != value])[:HISTORY_MAX]
 
     def normalized(self) -> "Rule":
         kind = self.kind if self.kind in KINDS else "ask"
@@ -69,8 +79,13 @@ class Rule:
             offset = int(self.offset)
         except (TypeError, ValueError):
             offset = 0
+        history: list[str] = []
+        for h in (self.history if isinstance(self.history, (list, tuple)) else []):
+            h = h.strip() if isinstance(h, str) else ""
+            if h and h not in history:
+                history.append(h)
         return Rule(str(self.id), str(self.name).strip() or "名前なし", kind, str(self.value or ""), fmt,
-                    max(-3660, min(3660, offset)), bool(self.remember))
+                    max(-3660, min(3660, offset)), bool(self.remember), history[:HISTORY_MAX] if kind == "fixed" else [])
 
 
 def default_rules() -> list[Rule]:
@@ -133,15 +148,20 @@ class RuleBook:
             self.load()
 
     def load(self) -> None:
+        """設定ファイルを読む。無い・壊れている・中身の形が違うときは、最初のルールのままにする
+        （起動のたびに読むので、ここで例外を外へ出すとアプリが起動できなくなる）。"""
         try:
             with open(self.path, encoding="utf-8") as f:
                 data = json.load(f)
+            items = data.get("rules") if isinstance(data, dict) else None
+            if not isinstance(items, list):
+                return
             rules = [Rule(**{k: v for k, v in item.items() if k in Rule.__dataclass_fields__}).normalized()
-                     for item in data.get("rules", []) if isinstance(item, dict) and item.get("id")]
+                     for item in items if isinstance(item, dict) and item.get("id")]
             if rules:
                 self.rules = rules
-        except (OSError, ValueError, TypeError):
-            pass                                    # 無い・壊れているときは最初のルールのまま
+        except Exception:
+            pass
 
     def save(self) -> None:
         if not self.path:
@@ -173,7 +193,14 @@ class RuleBook:
         self.rules.append(rule)
 
     def remove(self, rule_id: str) -> None:
-        self.rules = [r for r in self.rules if r.id != rule_id]
+        self.set_rules([r for r in self.rules if r.id != rule_id])
+
+    def set_rules(self, rules: list[Rule]) -> None:
+        """ルールを入れ替える。1 つも無いと枠を置けないので、空にされたときは最初のルールに戻す。"""
+        self.rules = [r.normalized() for r in rules] or default_rules()
+        for r in self.rules:
+            if r.kind == "fixed":
+                r.push_history(r.value)             # 今の内容も履歴に入れておく（あとで別の内容に変えても戻せるように）
 
     def remember_values(self, values: dict[str, str]) -> bool:
         """差し替え印刷で入力した内容を覚える。決まった文字は必ず、毎回入力は「覚えておく」のものだけ。変わったら True。"""
@@ -183,6 +210,9 @@ class RuleBook:
                 continue
             v = values[rule.id]
             if (rule.kind == "fixed" or (rule.kind == "ask" and rule.remember)) and rule.value != v:
+                if rule.kind == "fixed":
+                    rule.push_history(rule.value)   # 前の内容も履歴に残す
+                    rule.push_history(v)
                 rule.value = v
                 changed = True
         return changed
