@@ -28,7 +28,7 @@ from stamps import MM, StampLibrary, config_dir, random_tilt
 import fonts
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.5.2"
+__version__ = "1.5.3"
 
 
 def resource_path(rel: str) -> str:
@@ -385,7 +385,7 @@ class _UpdateCheckThread(QThread):
         try:
             self.done.emit(updater.check_for_update(self._current, self._fetch), "")
         except Exception as e:
-            self.done.emit(None, str(e) or type(e).__name__)
+            self.done.emit(None, updater.describe_error(e))
 
 
 class _DownloadThread(QThread):
@@ -408,7 +408,7 @@ class _DownloadThread(QThread):
         try:
             self.path = updater.download_installer(self._info, prog, self._opener)
         except Exception as e:
-            self.error = str(e) or type(e).__name__
+            self.error = updater.describe_error(e)
         self.done.emit()
 
 

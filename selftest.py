@@ -1,6 +1,7 @@
 """配布用 exe の自己診断（CI 用、Qt 非依存）。
 
-PyInstaller でまとめた exe の中でも、書き込み機能（手書き・図形・埋め込みフォントの文字）と保存が動くかを確かめる。
+PyInstaller でまとめた exe の中でも、書き込み機能（手書き・図形・埋め込みフォントの文字）と保存、
+自動アップデートの通信の準備（接続先の証明書を Windows のしくみで確かめられるか）が動くかを確かめる。
 `PdfPageEditor.exe --selftest 記録ファイル` で実行する。画面は出さず、結果を記録ファイルに書いて終了コードで知らせる
 （0 = 成功、1 = 失敗）。配布版は画面付きのアプリで標準出力が無いので、ファイルに書く。
 """
@@ -8,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sys
 import tempfile
 import traceback
 
@@ -61,6 +63,15 @@ def run(log_path: str | None = None) -> int:
             raise RuntimeError("annotations missing after save")
         if size > 400_000 * max(1, len(available)):
             raise RuntimeError(f"output too large ({size} bytes): fonts were not subset")
+        # 自動アップデートの通信: Windows 自身のしくみ（truststore）で GitHub の証明書を確かめられるか。
+        # まとめた exe に truststore が入っていない・証明書を確かめられないなら失敗。ネットワークに出られないだけなら記録だけ
+        import updater
+        try:
+            lines.append(updater.tls_selftest())
+        except RuntimeError as e:
+            if getattr(sys, "frozen", False):
+                raise
+            lines.append(f"{e} (ignored: not a packaged exe)")
         lines.append("OK")
         code = 0
     except Exception:
