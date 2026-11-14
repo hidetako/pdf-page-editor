@@ -146,6 +146,41 @@ def installer_args(path: str, exe_path: str | None = None, env: dict | None = No
     return [path, "/SILENT", "/NORESTART", "/LAUNCH=1", install_scope_arg(exe_path, env)]
 
 
+def installer_env(environ: dict | None = None, bundle_dir: str | None = None) -> dict:
+    """インストーラーを起動するときの環境変数。PyInstaller が自分用に入れたものを取り除いたコピーを返す。
+
+    1 ファイル版の exe は、起動のたびに一時フォルダー（_MEI…）へ中身を展開し、その場所を環境変数
+    （_PYI_APPLICATION_HOME_DIR など）で自分の子プロセスに伝える。これがインストーラー経由で
+    「更新後に起動し直したアプリ」まで引き継がれると、新しいアプリは古いアプリの一時フォルダー（すでに削除済み）を
+    使おうとして、「Failed to load Python DLL …\\_MEI…\\python312.dll」で起動に失敗する。
+
+    bundle_dir は今のアプリの一時フォルダー（sys._MEIPASS）。PATH などに入っているその場所も取り除く。
+    """
+    env = dict(os.environ if environ is None else environ)
+    for key in list(env):
+        k = key.upper()
+        if k.startswith("_PYI_") or k == "_MEIPASS2":
+            del env[key]
+    if bundle_dir:
+        def norm(p: str) -> str:
+            return p.replace("\\", "/").rstrip("/").lower()
+
+        base = norm(bundle_dir)
+
+        def inside(p: str) -> bool:
+            n = norm(p)
+            return n == base or n.startswith(base + "/")
+
+        sep = ";" if ("\\" in bundle_dir or os.pathsep == ";") else os.pathsep
+        for key in list(env):
+            value = env[key]
+            if key.upper() == "PATH":
+                env[key] = sep.join(part for part in value.split(sep) if not inside(part))
+            elif value and inside(value.split(sep)[0]):      # QT_PLUGIN_PATH など、一時フォルダーの中を指すもの
+                del env[key]
+    return env
+
+
 def _http_get(url: str) -> bytes:
     with _http_open(url) as r:
         return r.read()

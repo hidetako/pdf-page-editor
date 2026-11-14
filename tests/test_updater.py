@@ -9,7 +9,7 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import updater
-from updater import DOWNLOAD_PREFIX, UpdateInfo, check_for_update, download_installer, install_scope_arg, installer_args, is_newer, parse_version
+from updater import DOWNLOAD_PREFIX, UpdateInfo, check_for_update, download_installer, install_scope_arg, installer_args, installer_env, is_newer, parse_version
 
 
 def release(tag="v1.3.0", assets=None, **extra):
@@ -82,6 +82,19 @@ def main():
     assert installer_args(r"C:\x\Setup.exe", r"C:\Users\u\AppData\Local\Programs\PdfPageEditor\PdfPageEditor.exe", env) == \
         [r"C:\x\Setup.exe", "/SILENT", "/NORESTART", "/LAUNCH=1", "/CURRENTUSER"]
     assert installer_args(r"C:\x\Setup.exe", r"C:\Program Files\PdfPageEditor\PdfPageEditor.exe", env)[-1] == "/ALLUSERS"
+    # インストーラーには PyInstaller 用の環境変数を渡さない（更新後に起動し直したアプリが、古い一時フォルダーを使おうとして失敗するため）
+    frozen = {"PATH": r"C:\Windows", "TEMP": r"C:\T", "_PYI_ARCHIVE_FILE": r"C:\app\PdfPageEditor.exe",
+              "_PYI_APPLICATION_HOME_DIR": r"C:\T\_MEI123", "_PYI_PARENT_PROCESS_LEVEL": "1", "_pyi_splash_ipc": "1", "_MEIPASS2": r"C:\T\_MEI123"}
+    cleaned = installer_env(frozen)
+    assert cleaned == {"PATH": r"C:\Windows", "TEMP": r"C:\T"}, cleaned
+    assert "_PYI_ARCHIVE_FILE" in frozen, "元の辞書は書き換えない"
+    assert installer_env({"A": "1"}) == {"A": "1"}
+    # アプリの一時フォルダーを指しているもの（PATH の一部、Qt のプラグインの場所）も渡さない
+    frozen = {"Path": r"C:\T\_MEI123;C:\Windows;c:\t\_mei123\PySide6;C:\T\_MEI1234", "QT_PLUGIN_PATH": r"C:\T\_MEI123\PySide6\plugins",
+              "QML2_IMPORT_PATH": r"C:\T\_MEI123\PySide6\qml", "TEMP": r"C:\T", "OTHER": r"C:\T\_MEI1234\x", "EMPTY": ""}
+    cleaned = installer_env(frozen, r"C:\T\_MEI123")
+    assert cleaned == {"Path": r"C:\Windows;C:\T\_MEI1234", "TEMP": r"C:\T", "OTHER": r"C:\T\_MEI1234\x", "EMPTY": ""}, cleaned
+    assert isinstance(installer_env(), dict) and not any(k.upper().startswith("_PYI_") for k in installer_env())
     print("updater tests passed")
 
 

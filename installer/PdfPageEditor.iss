@@ -69,6 +69,19 @@ Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#StringChange(AppN
 Filename: "{app}\{#AppExe}"; Flags: nowait; Check: WantsLaunch
 
 [Code]
+function SetEnvironmentVariable(lpName: String; lpValue: String): BOOL;
+  external 'SetEnvironmentVariableW@kernel32.dll stdcall';
+
+function InitializeSetup: Boolean;
+begin
+  // アプリ内の自動アップデートから起動されると、動いていたアプリ（PyInstaller の 1 ファイル版 exe）の環境変数を
+  // 引き継いでいる。その中には古いアプリの一時フォルダー（_MEI…）の場所が入っていて、そのまま新しいアプリを
+  // 起動すると「Failed to load Python DLL」で失敗する。PyInstaller 公式の指定（この変数を 1 にする）で、
+  // 次に起動する exe に「引き継いだ情報を捨てて、独立したアプリとして起動する」よう伝える。
+  SetEnvironmentVariable('PYINSTALLER_RESET_ENVIRONMENT', '1');
+  Result := True;
+end;
+
 function WantsLaunch: Boolean;
 begin
   Result := ExpandConstant('{param:LAUNCH|0}') = '1';
