@@ -1,6 +1,8 @@
 """自動アップデート（Qt 非依存）。GitHub Releases の最新版を調べ、インストーラーをダウンロードする。
 
-- 参照先は本リポジトリの Releases API だけ。ダウンロード元も同リポジトリの Releases の URL に限定する
+- 参照先は本リポジトリの Releases だけ。まず API で調べ、API が使えないとき（同じ回線からの利用が多いと出る
+  「403 rate limit exceeded」など）は、Releases のページの転送先（…/releases/tag/vX.Y.Z）から最新版の番号を読む。
+  ダウンロード元も同リポジトリの Releases の URL に限定する
 - 通信は urllib（標準ライブラリ）。接続先の証明書は、まず truststore（Windows 自身のしくみ。ブラウザーと同じ判定）で確かめ、
   それで通らないときだけ Python 標準の方法でも試す（_ssl_contexts 参照）
 - ネットワーク不通・API エラーは例外にし、呼び出し側（起動時チェック）は黙って無視する
@@ -58,9 +60,49 @@ def fetch_latest_release(fetch: Callable[[str], bytes] | None = None) -> dict:
     return json.loads(fetch(API_LATEST).decode("utf-8"))
 
 
-def check_for_update(current_version: str, fetch: Callable[[str], bytes] | None = None) -> UpdateInfo | None:
-    """新しい版があれば UpdateInfo、無ければ None。"""
-    data = fetch_latest_release(fetch)
+TAG_URL_RE = re.compile(r"^https://github\.com/" + re.escape(GITHUB_REPO) + r"/releases/tag/(v?\d+(?:\.\d+){0,3})/?$")
+
+
+def latest_tag_from_page(resolve: Callable[[str], str] | None = None) -> tuple[str, str]:
+    """API を使わずに最新版のタグを調べる。戻り値は (タグ, リリースページの URL)。
+
+    https://github.com/<repo>/releases/latest は、最新の正式リリースのページ（…/releases/tag/vX.Y.Z）へ転送される。
+    その転送先の URL からタグを読む。API と違って「1 時間あたり 60 回まで（同じ回線の合計）」の制限を受けない。
+    resolve は URL を渡すと転送先の URL を返す関数（テストで差し替える）。
+    """
+    final = (resolve or _resolve_url)(RELEASES_PAGE)
+    m = TAG_URL_RE.match(str(final))
+    if not m:
+        raise OSError(f"最新版のページを確認できませんでした（{final}）。")
+    return m.group(1), m.group(0).rstrip("/")
+
+
+def _info_from_tag(tag: str, page_url: str) -> UpdateInfo:
+    """タグだけ分かっているときの UpdateInfo。インストーラーの名前は workflow が付ける決まった形から組み立てる。
+    リリースノートとファイルサイズは分からない（サイズはダウンロード時に Content-Length を使う）。"""
+    name = f"PdfPageEditor-Setup-{tag.lstrip('vV')}.exe"
+    return UpdateInfo(version=".".join(str(n) for n in parse_version(tag)), tag=tag, notes="", page_url=page_url,
+                      installer_url=f"{DOWNLOAD_PREFIX}{tag}/{name}", installer_name=name, installer_size=0)
+
+
+def check_for_update(current_version: str, fetch: Callable[[str], bytes] | None = None,
+                     resolve: Callable[[str], str] | None = None) -> UpdateInfo | None:
+    """新しい版があれば UpdateInfo、無ければ None。
+
+    まず Releases API で調べる。API が使えないときは、Releases のページの転送先から最新版のタグを読む
+    （latest_tag_from_page）。どちらもだめなら、API のエラーを返す。
+    fetch だけを差し替えたとき（テスト）は、実際のネットワークに出ないよう、ページからの確認はしない。
+    """
+    try:
+        data = fetch_latest_release(fetch)
+    except Exception as api_error:
+        if fetch is not None and resolve is None:
+            raise
+        try:
+            tag, page_url = latest_tag_from_page(resolve)
+        except Exception:
+            raise api_error from None
+        return _info_from_tag(tag, page_url) if is_newer(tag, current_version) else None
     tag = str(data.get("tag_name", ""))
     if not tag or data.get("draft") or data.get("prerelease"):
         return None
@@ -115,9 +157,10 @@ def download_installer(info: UpdateInfo, progress: Callable[[int, int], bool] | 
         close = getattr(resp, "close", None)
         if close:
             close()
-    if info.installer_size and received != info.installer_size:
+    expected = info.installer_size or total      # API で調べられなかったときは、サーバーが知らせた大きさ（Content-Length）と比べる
+    if expected and received != expected:
         os.remove(tmp)
-        raise OSError(f"ダウンロードしたサイズが一致しません（{received} / {info.installer_size}）。")
+        raise OSError(f"ダウンロードしたサイズが一致しません（{received} / {expected}）。")
     os.replace(tmp, dest)
     return dest
 
@@ -222,6 +265,12 @@ def describe_error(exc: BaseException) -> str:
                 "最新版は、ブラウザーで次のページを開くと入手できます。\n"
                 f"{RELEASES_PAGE}\n\n"
                 f"（詳細: {detail}）")
+    if getattr(exc, "code", None) in (403, 429):
+        return ("GitHub が一時的に問い合わせを受け付けていません（同じ回線からの利用が多いときに出る制限です）。\n"
+                "しばらく（最長 1 時間ほど）待つと、また確認できるようになります。\n\n"
+                "最新版は、ブラウザーで次のページを開いても入手できます。\n"
+                f"{RELEASES_PAGE}\n\n"
+                f"（詳細: {detail}）")
     return detail
 
 
@@ -251,8 +300,14 @@ def _http_get(url: str) -> bytes:
         return r.read()
 
 
-def _http_open(url: str):
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
+def _resolve_url(url: str) -> str:
+    """url を開き、転送をたどった先の URL を返す（中身は読まない）。"""
+    with _http_open(url, accept="text/html") as r:
+        return r.geturl()
+
+
+def _http_open(url: str, accept: str = "application/vnd.github+json"):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": accept})
     last: BaseException | None = None
     for context in _ssl_contexts():
         try:

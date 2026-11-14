@@ -28,7 +28,7 @@ from stamps import MM, StampLibrary, config_dir, random_tilt
 import fonts
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.5.3"
+__version__ = "1.5.4"
 
 
 def resource_path(rel: str) -> str:
