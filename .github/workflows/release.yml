@@ -109,7 +109,7 @@ jobs:
       - name: Build exe (PyInstaller)
         # PyMuPDF 2.x のレイアウト解析モデルは不要なので除外（同梱すると起動時に layout_rf*.yaml を探して失敗する）。
         # hooks/hook-pymupdf.py は、PyMuPDF の付属データ（ONNX モデルなど約 43 MB）を同梱させないための置き換えフック
-        run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" --additional-hooks-dir hooks --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
+        run: pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets/icon.ico --add-data "assets/icon.ico;assets" --add-data "assets/icons;assets/icons" --additional-hooks-dir hooks --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
 
       - name: Check exe size
         # 依存パッケージの更新で、気付かないうちに配布サイズが膨らむことがある（1.5.0 で 73 MB → 116 MB になった）。公開は止めず、警告だけ出す
@@ -177,7 +177,10 @@ jobs:
           Get-Process PdfPageEditor -ErrorAction SilentlyContinue | Format-Table Id, MainWindowTitle, StartTime | Out-String | Write-Host
           Get-Process PdfPageEditor -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
           if (-not $ok) { throw 'the app relaunched by the installer did not start' }
-          Write-Host "relaunched app started: version $(Get-Content $marker)"
+          $started = Get-Content $marker
+          Write-Host "relaunched app started: version $started"
+          # リボンのアイコン（assets/icons）が配布物に入っていて、まとめた exe の中で読めているか
+          if ($started -notmatch 'missing_icons=0') { throw "ribbon icons are missing in the packaged app: $started" }
 
       - name: List outputs
         run: Get-ChildItem dist
