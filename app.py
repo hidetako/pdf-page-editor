@@ -29,7 +29,7 @@ import fonts
 import ribbon
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.6.1"
+__version__ = "1.6.2"
 
 
 def resource_path(rel: str) -> str:
