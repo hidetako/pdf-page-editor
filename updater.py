@@ -1,7 +1,8 @@
 """自動アップデート（Qt 非依存）。GitHub Releases の最新版を調べ、インストーラーをダウンロードする。
 
 - 参照先は本リポジトリの Releases API だけ。ダウンロード元も同リポジトリの Releases の URL に限定する
-- 通信は urllib（標準ライブラリ）。exe 化後は Windows の証明書ストアで TLS 検証される
+- 通信は urllib（標準ライブラリ）。接続先の証明書は、まず truststore（Windows 自身のしくみ。ブラウザーと同じ判定）で確かめ、
+  それで通らないときだけ Python 標準の方法でも試す（_ssl_contexts 参照）
 - ネットワーク不通・API エラーは例外にし、呼び出し側（起動時チェック）は黙って無視する
 """
 from __future__ import annotations
@@ -9,7 +10,10 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
+import ssl
 import tempfile
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable
@@ -17,6 +21,7 @@ from typing import Callable
 GITHUB_REPO = "hidetako/pdf-page-editor"
 API_LATEST = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 DOWNLOAD_PREFIX = f"https://github.com/{GITHUB_REPO}/releases/download/"
+RELEASES_PAGE = f"https://github.com/{GITHUB_REPO}/releases/latest"
 INSTALLER_RE = re.compile(r"^PdfPageEditor-Setup-.*\.exe$", re.I)
 USER_AGENT = "PdfPageEditor-updater"
 TIMEOUT = 8
@@ -181,6 +186,66 @@ def installer_env(environ: dict | None = None, bundle_dir: str | None = None) ->
     return env
 
 
+def _ssl_contexts() -> list:
+    """接続先の証明書を確かめる方法を、試す順に返す。
+
+    1. truststore … Windows 自身のしくみ（ブラウザーや PowerShell と同じ）で確かめる。
+    2. Python 標準 … Windows の証明書ストアに「すでに入っている」証明書だけで、Python（OpenSSL）が自分で確かめる。
+
+    2 だけだと、PC によっては正しい接続先でも CERTIFICATE_VERIFY_FAILED（unable to get issuer certificate）になる。
+    Windows はルート証明書を必要になったときに取り寄せるので、まだストアに無い PC がある。また、セキュリティソフトや
+    社内の機器が通信を検査している環境では、ストアの中身だけでは証明書のつながりをたどれないことがある。
+    1 はどちらの場合も Windows と同じ判定になる。
+    """
+    contexts = []
+    try:
+        import truststore
+        contexts.append(truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT))
+    except Exception:
+        pass
+    contexts.append(ssl.create_default_context())
+    return contexts
+
+
+def is_cert_error(exc: BaseException) -> bool:
+    """接続先の証明書を確かめられなかったエラーか（urllib は URLError に包んで返す）。"""
+    reason = getattr(exc, "reason", None)
+    return isinstance(exc, ssl.SSLCertVerificationError) or isinstance(reason, ssl.SSLCertVerificationError)
+
+
+def describe_error(exc: BaseException) -> str:
+    """利用者に見せるエラー文。証明書のエラーは、理由の見当と手動で更新する方法を添える。"""
+    detail = str(exc) or type(exc).__name__
+    if is_cert_error(exc):
+        return ("接続先（GitHub）の証明書を確かめられませんでした。\n"
+                "セキュリティソフトや職場のネットワークが通信を検査していると起こることがあります。\n\n"
+                "最新版は、ブラウザーで次のページを開くと入手できます。\n"
+                f"{RELEASES_PAGE}\n\n"
+                f"（詳細: {detail}）")
+    return detail
+
+
+def tls_selftest(host: str = "api.github.com", timeout: float = 6.0) -> str:
+    """自己診断用: truststore で host に TLS 接続できるか。結果を 1 行で返す。
+
+    truststore が入っていない・証明書を確かめられないときは RuntimeError。ネットワークに出られないだけなら
+    「skipped」と返す（診断は失敗にしない）。
+    """
+    try:
+        import truststore
+    except Exception as e:
+        raise RuntimeError(f"truststore is not available: {e}") from e
+    ctx = truststore.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    try:
+        with socket.create_connection((host, 443), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                return f"TLS (truststore) to {host}: OK, {tls.version()}"
+    except ssl.SSLCertVerificationError as e:
+        raise RuntimeError(f"TLS (truststore) to {host}: certificate verification failed: {e}") from e
+    except OSError as e:
+        return f"TLS (truststore) to {host}: skipped ({type(e).__name__}: {e})"
+
+
 def _http_get(url: str) -> bytes:
     with _http_open(url) as r:
         return r.read()
@@ -188,4 +253,12 @@ def _http_get(url: str) -> bytes:
 
 def _http_open(url: str):
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
-    return urllib.request.urlopen(req, timeout=TIMEOUT)
+    last: BaseException | None = None
+    for context in _ssl_contexts():
+        try:
+            return urllib.request.urlopen(req, timeout=TIMEOUT, context=context)
+        except Exception as e:
+            if not is_cert_error(e):        # 証明書以外のエラー（圏外・タイムアウトなど）は、方法を変えても同じ
+                raise
+            last = e
+    raise last if last is not None else OSError("no TLS context")

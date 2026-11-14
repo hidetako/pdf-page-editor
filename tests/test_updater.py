@@ -95,7 +95,63 @@ def main():
     cleaned = installer_env(frozen, r"C:\T\_MEI123")
     assert cleaned == {"Path": r"C:\Windows;C:\T\_MEI1234", "TEMP": r"C:\T", "OTHER": r"C:\T\_MEI1234\x", "EMPTY": ""}, cleaned
     assert isinstance(installer_env(), dict) and not any(k.upper().startswith("_PYI_") for k in installer_env())
+    test_tls()
     print("updater tests passed")
+
+
+def test_tls():
+    """接続先の証明書の確かめ方: まず truststore（Windows 自身のしくみ）、だめなら Python 標準。"""
+    import ssl
+    import urllib.error
+
+    contexts = updater._ssl_contexts()
+    assert len(contexts) >= 2 and type(contexts[0]).__module__.startswith("truststore"), contexts
+    assert isinstance(contexts[-1], ssl.SSLContext)
+
+    cert_err = urllib.error.URLError(ssl.SSLCertVerificationError(1, "[SSL: CERTIFICATE_VERIFY_FAILED] unable to get issuer certificate"))
+    assert updater.is_cert_error(cert_err) and updater.is_cert_error(cert_err.reason)
+    assert not updater.is_cert_error(urllib.error.URLError("timed out")) and not updater.is_cert_error(OSError("x"))
+    text = updater.describe_error(cert_err)
+    assert updater.RELEASES_PAGE in text and "CERTIFICATE_VERIFY_FAILED" in text and "証明書" in text, text
+    assert updater.describe_error(OSError("圏外")) == "圏外" and updater.describe_error(TimeoutError()) == "TimeoutError"
+
+    real_contexts, real_urlopen = updater._ssl_contexts, updater.urllib.request.urlopen
+    calls = []
+
+    def fake_urlopen(behaviour):
+        def urlopen(req, timeout=None, context=None):
+            calls.append(context)
+            result = behaviour[context]
+            if isinstance(result, Exception):
+                raise result
+            return result
+        return urlopen
+
+    try:
+        updater._ssl_contexts = lambda: ["windows", "python"]
+        # 1 つ目で通ればそれを使う
+        updater.urllib.request.urlopen = fake_urlopen({"windows": "ok1", "python": "ok2"})
+        assert updater._http_open("https://api.github.com/x") == "ok1" and calls == ["windows"]
+        # 1 つ目が証明書エラーなら 2 つ目で試す
+        calls.clear()
+        updater.urllib.request.urlopen = fake_urlopen({"windows": cert_err, "python": "ok2"})
+        assert updater._http_open("https://api.github.com/x") == "ok2" and calls == ["windows", "python"]
+        # 証明書以外のエラーは、方法を変えずにそのまま返す
+        calls.clear()
+        updater.urllib.request.urlopen = fake_urlopen({"windows": urllib.error.URLError("timed out"), "python": "ok2"})
+        try:
+            updater._http_open("https://api.github.com/x"); raise AssertionError("エラーにならない")
+        except urllib.error.URLError as e:
+            assert not updater.is_cert_error(e) and calls == ["windows"]
+        # どちらも証明書エラーなら、そのエラーを返す
+        calls.clear()
+        updater.urllib.request.urlopen = fake_urlopen({"windows": cert_err, "python": cert_err})
+        try:
+            updater._http_open("https://api.github.com/x"); raise AssertionError("エラーにならない")
+        except urllib.error.URLError as e:
+            assert updater.is_cert_error(e) and calls == ["windows", "python"]
+    finally:
+        updater._ssl_contexts, updater.urllib.request.urlopen = real_contexts, real_urlopen
 
 
 if __name__ == "__main__":
