@@ -96,7 +96,69 @@ def main():
     assert cleaned == {"Path": r"C:\Windows;C:\T\_MEI1234", "TEMP": r"C:\T", "OTHER": r"C:\T\_MEI1234\x", "EMPTY": ""}, cleaned
     assert isinstance(installer_env(), dict) and not any(k.upper().startswith("_PYI_") for k in installer_env())
     test_tls()
+    test_fallback_without_api()
     print("updater tests passed")
+
+
+def test_fallback_without_api():
+    """API が使えないとき（403 rate limit exceeded など）は、Releases のページの転送先から最新版を調べる。"""
+    import urllib.error
+
+    def limited(url):
+        raise urllib.error.HTTPError(url, 403, "rate limit exceeded", {}, None)
+
+    base = "https://github.com/hidetako/pdf-page-editor/releases/"
+    asked = []
+
+    def page(tag):
+        def resolve(url):
+            asked.append(url)
+            return base + "tag/" + tag
+        return resolve
+
+    info = check_for_update("1.5.3", limited, page("v1.5.4"))
+    assert asked == [updater.RELEASES_PAGE] and info is not None
+    assert (info.version, info.tag, info.notes, info.installer_size) == ("1.5.4", "v1.5.4", "", 0)
+    assert info.installer_name == "PdfPageEditor-Setup-1.5.4.exe" and info.page_url == base + "tag/v1.5.4"
+    assert info.installer_url == DOWNLOAD_PREFIX + "v1.5.4/PdfPageEditor-Setup-1.5.4.exe"
+    # 最新版と同じ・古いなら「更新なし」
+    assert check_for_update("1.5.4", limited, page("v1.5.4")) is None
+    assert check_for_update("1.6.0", limited, page("v1.5.4")) is None
+    # API が使えるときはページを見ない
+    asked.clear()
+    assert check_for_update("1.5.3", release("v1.5.4"), page("v9.9.9")).version == "1.5.4" and asked == []
+    # ページからも分からない（リリースが無い・想定外の転送先・通信できない）ときは、API のエラーを返す
+    for bad in (lambda url: base, lambda url: "https://evil.example/releases/tag/v9.9.9",
+                lambda url: base + "tag/v9.9.9/../../x", lambda url: (_ for _ in ()).throw(OSError("圏外"))):
+        try:
+            check_for_update("1.5.3", limited, bad); raise AssertionError("エラーにならない")
+        except urllib.error.HTTPError as e:
+            assert e.code == 403
+    # fetch だけを差し替えたとき（テスト）は、実際のネットワークには出ない
+    try:
+        check_for_update("1.5.3", limited); raise AssertionError("エラーにならない")
+    except urllib.error.HTTPError:
+        pass
+    # ページから調べたときはファイルサイズが分からないので、サーバーが知らせた大きさ（Content-Length）と比べる
+    class Resp:
+        def __init__(self, data, length):
+            self._data, self.headers = data, {"Content-Length": str(length)}
+
+        def read(self, n):
+            chunk, self._data = self._data[:n], self._data[n:]
+            return chunk
+
+    path = download_installer(info, None, lambda url: Resp(b"x" * 1000, 1000))
+    assert os.path.getsize(path) == 1000
+    os.remove(path)
+    try:
+        download_installer(info, None, lambda url: Resp(b"x" * 900, 1000)); raise AssertionError("途中で切れたのに成功した")
+    except OSError as e:
+        assert "一致しません" in str(e)
+    assert not os.path.exists(path) and not os.path.exists(path + ".part")
+    text = updater.describe_error(urllib.error.HTTPError("u", 403, "rate limit exceeded", {}, None))
+    assert updater.RELEASES_PAGE in text and "rate limit exceeded" in text and "待つ" in text, text
+    assert updater.describe_error(urllib.error.HTTPError("u", 500, "Server Error", {}, None)) == "HTTP Error 500: Server Error"
 
 
 def test_tls():
