@@ -303,4 +303,38 @@ try:
 except Exception as e:
     print("stamp edit dialog skipped:", e)
 
+# 13 / 14. 差し替え印刷（FAX の送付状のひな形）
+import fields
+from field_ui import FillDialog
+fax = os.path.join(TMP, "FAX送付状.pdf")
+fd = fitz.open(); fp = fd.new_page()
+fp.insert_text((205, 95), "FAX 送付状", fontsize=28, fontname=F)
+for fy, ft in ((160, "送付日"), (205, "宛先"), (270, "送付元"), (335, "件名"), (380, "枚数（本状含む）")):
+    fp.insert_text((70, fy), ft, fontsize=13, fontname=F); fp.draw_line((70, fy + 26), (525, fy + 26), width=0.5)
+fd.save(fax); fd.close()
+win.model.modified = False
+win.open_file(fax); QTest.qWait(400); win.zoom_fit(); QTest.qWait(300)
+win.rib.set_current("fill"); QTest.qWait(200)
+book = win.rules
+book.get("from").value = "△△病院 外科　佐藤 花子"
+def put(rule_id, x, y, width=None):
+    rule = book.get(rule_id)
+    win.model.add_text_box(0, (x, y), win._field_text(rule), fontsize=13, color=(0, 0, 0), wrap_width=width, field=fields.field_spec(rule))
+put("date", 210, 146); put("to", 210, 191, 300); put("from", 210, 256, 300); put("subject", 210, 321, 300); put("pages", 210, 366)
+win.refresh_thumbs(select=[0]); QTest.qWait(400)
+win.scroll.verticalScrollBar().setValue(0); QTest.qWait(300)
+rule_c = win.cb_rule.mapTo(win, QPoint(win.cb_rule.width() + 14, win.cb_rule.height() // 2))
+shot(win, "13_fill_tab.png", callouts=[(rule_c.x(), rule_c.y(), 1), (*tb_center(win, win.a_field, "fill"), 2), (*tb_center(win, win.a_rules, "fill"), 3),
+                                       (*tb_center(win, win.a_fill_print, "fill"), 4)])
+rows = []
+for f in win.model.fields():
+    r = book.for_spec(f["field"])
+    if r.id not in [x[0].id for x in rows]:
+        rows.append((r, fields.resolve(r)))
+fdlg = FillDialog(rows, win)
+fdlg.set_value("to", "〇〇クリニック 御中\n院長 山田 太郎 先生"); fdlg.set_value("subject", "診療情報提供書の送付について"); fdlg.set_value("pages", "3 枚")
+fdlg.show(); QTest.qWait(300)
+fdlg.grab().save(os.path.join(OUT, "14_fill_dialog.png")); fdlg.hide(); print("shot 14")
+win.model.modified = False
+
 print("done", OUT)

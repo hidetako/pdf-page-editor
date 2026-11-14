@@ -4,6 +4,7 @@ PySide6 + PyMuPDF。Windows では build_windows.bat で単一 exe にできる�
 """
 from __future__ import annotations
 
+import datetime
 import os
 import subprocess
 import sys
@@ -15,7 +16,7 @@ from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QRectF,
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDragEnterEvent, QDropEvent, QIcon, QImage,
                            QKeySequence, QShortcut, QPainter, QPainterPath, QPen, QPixmap, QPolygonF)
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
-from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
+from PySide6.QtWidgets import (QApplication, QColorDialog, QComboBox, QDialog, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
                                QPushButton, QScrollArea, QSplitter, QStatusBar, QToolTip,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -25,11 +26,13 @@ import updater
 from write_ui import DRAW_TOOLS, WriteRibbon, tool_icon
 from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, config_dir, random_tilt
+import fields
 import fonts
 import ribbon
+from field_ui import FillDialog, RulesDialog
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.6.2"
+__version__ = "1.7.0"
 
 
 def resource_path(rel: str) -> str:
@@ -154,6 +157,7 @@ class PageView(QLabel):
         self.annot_box: tuple[float, float, float, float] | None = None       # 選択中の注釈の枠（相対座標）
         self.annot_handle = False           # 右下に大きさ変更のつまみを出すか
         self.preview: dict | None = None    # 描いている途中の線・図形 {"kind", "pts"(相対座標), "color", "width"(px), "opacity", "fill"}
+        self.field_rects: list[tuple[float, float, float, float]] = []       # 差し替え枠の場所（相対座標）。画面にだけ目印を出す
         self._dragging = False
         self._press_pos = QPointF()
         self._press_double = False
@@ -212,6 +216,11 @@ class PageView(QLabel):
         self.annot_box = rect
         self.annot_handle = handle and rect is not None
         self.update()
+
+    def set_field_rects(self, rects: list[tuple[float, float, float, float]]):
+        if rects != self.field_rects:
+            self.field_rects = rects
+            self.update()
 
     def set_preview(self, preview: dict | None):
         self.preview = preview
@@ -311,6 +320,20 @@ class PageView(QLabel):
 
     def paintEvent(self, e):
         super().paintEvent(e)
+        if self.field_rects:
+            # 差し替え枠の目印（緑の破線と、角の小さな印）。画面にだけ出し、印刷や保存には出ない
+            g = self.pix_geometry()
+            if g:
+                ox, oy, pw, ph = g
+                p = QPainter(self)
+                p.setRenderHint(QPainter.Antialiasing, True)
+                for x0, y0, x1, y1 in self.field_rects:
+                    r = QRectF(ox + x0 * pw, oy + y0 * ph, (x1 - x0) * pw, (y1 - y0) * ph).adjusted(-2, -2, 2, 2)
+                    p.setPen(QPen(QColor(0, 140, 110), 1.2, Qt.DashLine)); p.setBrush(Qt.NoBrush)
+                    p.drawRect(r)
+                    p.setPen(Qt.NoPen); p.setBrush(QColor(0, 140, 110))
+                    p.drawPolygon(QPolygonF([r.topLeft(), r.topLeft() + QPointF(8, 0), r.topLeft() + QPointF(0, 8)]))
+                p.end()
         if self.selection_rects:
             g = self.pix_geometry()
             if g:
@@ -442,6 +465,8 @@ class MainWindow(QMainWindow):
         self.sel_annot: tuple[int, int] | None = None     # 選択中の注釈 (ページ, xref)
         self._drag: dict | None = None                    # ドラッグ中の操作（描画・移動・大きさ変更）
         self._drag_changed = False                        # 直前のドラッグで何か（移動・大きさ変更・描画・文字の選択）をしたか
+        self.rules = fields.RuleBook(os.path.join(config_dir(), "rules.json"))    # 差し替え枠のルール（日付・送付元・住所・独自ルール…）
+        self.field_mode = False                           # 差し替え枠を置いている最中か（ページ上をドラッグ / クリックで置く）
         self.display_mode = "normal"
         self.auto_toc_panel = True
         self._words_cache: dict[int, list[dict]] = {}
@@ -618,6 +643,14 @@ class MainWindow(QMainWindow):
         self.a_del_annot.setEnabled(False)
         for a in (self.a_highlight, self.a_underline, self.a_strikeout):
             a.setEnabled(False)
+        # 差し替え（雛形の PDF に枠を置き、印刷のたびに中身を入れ替える）
+        self.a_field = act("差し替え枠を置く", self._toggle_field_mode, "F6", "textbox",
+                           "ON にしてページ上をドラッグ（またはクリック）すると、選んでいるルールの枠を置きます。日付の枠は自動で今日の日付になります。Esc で終了",
+                           checkable=True)
+        self.a_rules = act("ルールの管理...", self.edit_rules, None, "settings",
+                           "枠に入れる内容のルール（日付・送付元・住所・宛先など）を直す。自分のルールも足せます")
+        self.a_fill_print = act("差し替え印刷...", self.fill_print, None, "print_add",
+                                "枠に入れる内容を確かめて（入力して）印刷する。開いている PDF は書き換えません。内容を入れた PDF を別名で保存することもできます")
         # 表示
         self.mode_group = QActionGroup(self)
         self.mode_actions: dict[str, QAction] = {}
@@ -654,7 +687,7 @@ class MainWindow(QMainWindow):
 
         # 「ファイル」はメニューを開く（365 の Backstage 画面の代わり）
         fm = rb.add_file_menu("ファイル")
-        for a in (self.a_open, self.a_save, self.a_saveas, None, self.a_print, self.a_extract, self.a_password, None, self.a_quit):
+        for a in (self.a_open, self.a_save, self.a_saveas, None, self.a_print, self.a_fill_print, self.a_extract, self.a_password, None, self.a_quit):
             fm.addSeparator() if a is None else fm.addAction(a)
         QShortcut(QKeySequence("Alt+F"), self, activated=rb.show_file_menu)
 
@@ -683,6 +716,23 @@ class MainWindow(QMainWindow):
         self.ribbon.add_action_group("編集", [(self.a_del_annot, "削除"), (self.a_undo, None), (self.a_redo, None)])
         rb.add_tab("write", "書き込み", self.ribbon)
 
+        # 「差し替え」タブ: FAX の送付状のような雛形に、日付・宛先・送付元などの枠を置いて、中身を入れ替えて印刷する
+        fill = rb.add_tab("fill", "差し替え")
+        g = fill.add_group("枠")
+        box = QWidget(g)
+        bl = QVBoxLayout(box)
+        bl.setContentsMargins(4, 1, 4, 0); bl.setSpacing(1)
+        lb = QLabel("枠のルール", box); lb.setObjectName("ribbonFieldLabel")
+        self.cb_rule = QComboBox(box)
+        self.cb_rule.setMinimumContentsLength(10)
+        self.cb_rule.setToolTip("これから置く枠に入れるもの。日付は自動、送付元・住所などは毎回同じ内容、宛先などは印刷のたびに入力します")
+        bl.addWidget(lb); bl.addWidget(self.cb_rule); bl.addStretch(1)
+        g.add_widget(box)
+        g.add_large(self.a_field, "枠を\n置く"); g.add_large(self.a_rules, "ルールの\n管理")
+        g = fill.add_group("印刷")
+        g.add_large(self.a_fill_print, "差し替え\n印刷")
+        self._fill_rule_combo()
+
         view = rb.add_tab("view", "表示")
         g = view.add_group("ズーム")
         g.add_large(self.a_zoom_out); g.add_large(self.a_zoom_in); g.add_large(self.a_zoom_fit, "幅に\n合わせる"); g.add_large(self.a_zoom_100)
@@ -706,6 +756,17 @@ class MainWindow(QMainWindow):
         rb.tab_changed.connect(self._on_tab_changed)
         self.setMenuWidget(rb)
 
+    def _fill_rule_combo(self, select_id: str | None = None):
+        """「枠のルール」の一覧を、ルールの管理の内容に合わせる。"""
+        keep = select_id or self.cb_rule.currentData()
+        self.cb_rule.blockSignals(True)
+        self.cb_rule.clear()
+        for r in self.rules.rules:
+            self.cb_rule.addItem(r.name, r.id)
+        i = self.cb_rule.findData(keep)
+        self.cb_rule.setCurrentIndex(i if i >= 0 else 0)
+        self.cb_rule.blockSignals(False)
+
     def _on_tab_changed(self, key: str):
         """タブを切り替えた。「書き込み」タブを選んでいる間だけ、書き込みの道具を使える状態にする。"""
         if key == "write":
@@ -726,6 +787,11 @@ class MainWindow(QMainWindow):
         if not has and self.a_write.isChecked():
             self._toggle_write(False)
         self.rib.set_tab_enabled("write", has)
+        self.rib.set_tab_enabled("fill", has)
+        for a in (self.a_field, self.a_fill_print):
+            a.setEnabled(has)
+        if not has and self.field_mode:
+            self._set_field_mode(False)
         self.a_del_annot.setEnabled(has and self.sel_annot is not None)
         has_toc_sel = has and self.toc_tree.currentItem() is not None
         self.btn_bm_rename.setEnabled(has_toc_sel)
@@ -937,7 +1003,10 @@ class MainWindow(QMainWindow):
                 self._error(e)
                 return
         self.current = -1
+        updated = self._refresh_fields(redraw=False)       # 日付の枠を今日の日付に（開いただけでは「変更あり」にしない）
         self.refresh_thumbs(select=[0])
+        if updated:
+            self.statusBar().showMessage(f"差し替え枠 {updated} か所を、今日の日付・今のルールの内容に更新しました。", 6000)
         if self.auto_toc_panel and self.model.get_toc():
             self.toc_dock.show()
         limits = self.model.restrictions()
@@ -1004,8 +1073,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{len(sel)} ページを抽出: {path}", 4000)
 
     # ------------------------------------------------------------ 印刷
-    def print_dialog(self):
+    def print_dialog(self, model: PdfModel | None = None):
+        """印刷する。model を渡すとその文書（差し替え印刷で中身を入れた複製）を、渡さなければ開いている文書を印刷する。
+        開いている文書に差し替え枠があるときは、先に中身を確かめる画面（差し替え印刷）を出す。"""
         if self.model.doc is None or self.model.page_count == 0:
+            return
+        if not isinstance(model, PdfModel):
+            model = None
+        if model is None and self.model.fields():
+            self.fill_print()
             return
         printer = QPrinter(QPrinter.HighResolution)
         printer.setDocName(os.path.basename(self.model.path) if self.model.path else "無題")
@@ -1024,7 +1100,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("印刷するページがありません。", 4000)
             return
         try:
-            self.print_pages(printer, pages)
+            self.print_pages(printer, pages, model)
         except Exception as e:
             self._error(e)
             return
@@ -1052,10 +1128,11 @@ class MainWindow(QMainWindow):
             return list(range(lo - 1, hi))
         return list(range(n))
 
-    def print_pages(self, printer: QPrinter, pages: list[int]):
+    def print_pages(self, printer: QPrinter, pages: list[int], model: PdfModel | None = None):
         """各ページを印刷解像度で描画し、用紙の印刷可能領域に収めて（縦横比維持・中央）出力する。
         横長のページは用紙に合わせて自動で回転する。表示モード（暖色・反転）は印刷には適用しない。"""
-        doc = self.model.doc
+        model = model or self.model
+        doc = model.doc
         painter = QPainter()
         if not painter.begin(printer):
             raise RuntimeError("プリンターを開けませんでした。")
@@ -1068,7 +1145,7 @@ class MainWindow(QMainWindow):
                 landscape = rect.width > rect.height
                 area = printer.pageRect(QPrinter.DevicePixel)
                 area_landscape = area.width() > area.height()
-                img = pix_to_qimage(self.model.render(idx, scale=dpi / 72))
+                img = pix_to_qimage(model.render(idx, scale=dpi / 72))
                 painter.save()
                 painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
                 if landscape != area_landscape:
@@ -1177,6 +1254,7 @@ class MainWindow(QMainWindow):
         """Esc: 押印・付箋モードを終える。書き込み中は、まず道具を「選択」に戻し、次の Esc でリボンを閉じる。"""
         if self._drag is not None:
             self._abort_drag()
+        self._set_field_mode(False)
         self._set_stamp_mode(False)
         self._set_note_mode(False)
         had_selection = self.sel_annot is not None or bool(self.selected_text)
@@ -1209,6 +1287,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("先に PDF を開いてください。", 3000)
             on = False
         if on:
+            self._set_field_mode(False)
             self._set_stamp_mode(False)
             self._set_note_mode(False)
             if not self.ribbon._fonts_loaded:
@@ -1217,7 +1296,7 @@ class MainWindow(QMainWindow):
                     self.ribbon.ensure_fonts()
                 finally:
                     QApplication.restoreOverrideCursor()
-        self.a_write.blockSignals(True); self.a_write.setChecked(on); self.a_write.blockSignals(False)
+        self.a_write.setChecked(on)
         if not on and self.ribbon.tool() != "select":
             self.ribbon.blockSignals(True); self.ribbon.set_tool("select"); self.ribbon.blockSignals(False)
         # 「書き込み」タブを開く / 元のタブへ戻す（タブ側からの切り替えで呼ばれたときは、すでにそのタブになっている）
@@ -1247,7 +1326,7 @@ class MainWindow(QMainWindow):
         tool = self.write_tool
         for v in self.views:
             v.set_text_mode(tool == "text")
-            v.set_draw_mode(tool in DRAW_TOOLS)
+            v.set_draw_mode(tool in DRAW_TOOLS or self.field_mode)     # 差し替え枠もドラッグで置く
         self._update_ribbon_context()
 
     def _update_ribbon_context(self):
@@ -1370,11 +1449,12 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("先に PDF を開いてください。", 3000)
             on = False
         if on:
+            self._set_field_mode(False)
             self._set_stamp_mode(False)
             if self.ribbon.isVisible():
                 self._toggle_write(False)
         self.note_mode = on
-        self.a_note.blockSignals(True); self.a_note.setChecked(on); self.a_note.blockSignals(False)
+        self.a_note.setChecked(on)
         for v in self.views:
             v.set_note_mode(on)
         if on:
@@ -1384,6 +1464,7 @@ class MainWindow(QMainWindow):
 
     def _set_stamp_mode(self, on: bool):
         if on:
+            self._set_field_mode(False)
             self._set_note_mode(False)
             if self.ribbon.isVisible():
                 self._toggle_write(False)
@@ -1392,7 +1473,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("先に PDF を開いてください。", 3000)
             on = False
         self.stamp_mode = on
-        self.a_stamp.blockSignals(True); self.a_stamp.setChecked(on); self.a_stamp.blockSignals(False)
+        self.a_stamp.setChecked(on)
         self.stamp_dock_widget.btn_mode.blockSignals(True); self.stamp_dock_widget.set_mode(on); self.stamp_dock_widget.btn_mode.blockSignals(False)
         self._refresh_ghost()
         if on:
@@ -1500,7 +1581,10 @@ class MainWindow(QMainWindow):
         elif annot is not None:
             kind = annot["kind"]
             self._select_annot(index, annot["xref"])
-            if annot["type"] == fitz.PDF_ANNOT_FREE_TEXT:
+            if annot.get("field"):
+                menu.addAction("この枠のルールを変える...", lambda: self.edit_field(index, annot))
+                menu.addAction("文字サイズを変更...", lambda: self.resize_annot_text(index, annot))
+            elif annot["type"] == fitz.PDF_ANNOT_FREE_TEXT:
                 menu.addAction("文字を編集...", lambda: self.edit_annot_text(index, annot))
                 menu.addAction("文字サイズを変更...", lambda: self.resize_annot_text(index, annot))
             menu.addAction(f"{kind}の色を変更...", lambda: self.recolor_annot(index, annot["xref"]))
@@ -1520,6 +1604,7 @@ class MainWindow(QMainWindow):
         self._popup_menu(menu, gpos)
 
     def _end_all_modes(self):
+        self._set_field_mode(False)
         self._set_stamp_mode(False)
         self._set_note_mode(False)
         if self.ribbon.isVisible():
@@ -1571,7 +1656,8 @@ class MainWindow(QMainWindow):
             head = f"【{note['title']}】" if note["title"] else ""
             QToolTip.showText(gpos, f"{head}{note['text']}", v)
         else:
-            tip = annot["kind"] + (f": {annot['text']}" if annot["text"] else "") + ("（ドラッグで移動）" if annot["movable"] else "")
+            name = f"（{annot['field'].get('name', '')}）" if annot.get("field") else ""
+            tip = annot["kind"] + name + (f": {annot['text']}" if annot["text"] else "") + ("（ドラッグで移動）" if annot["movable"] else "")
             QToolTip.showText(gpos, tip, v)
 
     # ------------------------------------------------------------ テキスト選択・コピー
@@ -1606,7 +1692,7 @@ class MainWindow(QMainWindow):
         a = self.model.annot_at(index, pt, pad=ANNOT_HIT_PAD)
         if a is not None and a["type"] == fitz.PDF_ANNOT_FREE_TEXT:
             self._select_annot(index, a["xref"])
-            self.edit_annot_text(index, a)
+            self.edit_field(index, a) if a.get("field") else self.edit_annot_text(index, a)
         else:
             self.add_text_at(index, pt)
 
@@ -1629,6 +1715,11 @@ class MainWindow(QMainWindow):
         self._set_current(index)
         pt = self._page_point(index, frac)
         tool = self.write_tool
+        if self.field_mode:
+            # 差し替え枠: ドラッグした幅の枠を置く（クリックだけなら、中身に合わせた幅）
+            self._select_annot(None)
+            self._drag = {"kind": "field", "index": index, "pts": [pt]}
+            return
         if tool in DRAW_TOOLS:
             # ペン・直線・矢印・四角・丸: ドラッグで描く
             self._select_annot(None)
@@ -1671,6 +1762,9 @@ class MainWindow(QMainWindow):
         rb = self.ribbon
         kind = d["kind"]
         pts = d["pts"] if kind == "pen" else [d["pts"][0], d["pts"][-1]]
+        if kind == "field":         # 置こうとしている枠の範囲（緑の四角）
+            return {"kind": "rect", "pts": [(x / pr.width, y / pr.height) for x, y in pts], "color": QColor(0, 140, 110),
+                    "width": 1.5, "opacity": 1.0, "fill": False}
         return {"kind": kind, "pts": [(x / pr.width, y / pr.height) for x, y in pts],
                 "color": QColor.fromRgbF(*rb.color()), "width": rb.width() * self._view_scale(index),
                 "opacity": rb.opacity(), "fill": kind in ("rect", "ellipse") and rb.fill_enabled()}
@@ -1731,6 +1825,10 @@ class MainWindow(QMainWindow):
                     xref = self.model.resize_annot(i, a["xref"], new)
                     self.sel_annot = (i, xref)
                     msg = f"{a['kind']}の大きさを変えました。Ctrl+Z で戻せます"
+                elif d["kind"] == "field":
+                    msg = self._finish_field(d, pt)
+                    if msg is None:
+                        return
                 else:
                     msg = self._finish_drawing(d, pt)
                     if msg is None:
@@ -1787,7 +1885,7 @@ class MainWindow(QMainWindow):
         a = self._annot_hit(index, pt)
         if a is not None and a["type"] == fitz.PDF_ANNOT_FREE_TEXT:
             self._select_annot(index, a["xref"])
-            self.edit_annot_text(index, a)
+            self.edit_field(index, a) if a.get("field") else self.edit_annot_text(index, a)
 
     def _update_selection(self, pt: tuple[float, float]):
         index = self.sel_page
@@ -1926,6 +2024,158 @@ class MainWindow(QMainWindow):
         self.sel_annot = (index, xref)
         self._refresh_page(index)
         self.statusBar().showMessage(f"文字を書き込みました（ページ {index + 1}）。クリックで直す、ドラッグで移動、Ctrl+Z で取り消し", 5000)
+
+    # ------------------------------------------------------------ 差し替え枠
+    def _toggle_field_mode(self, on: bool):
+        self._set_field_mode(on)
+
+    def _set_field_mode(self, on: bool):
+        if on and self.model.doc is None:
+            self.statusBar().showMessage("先に PDF を開いてください。", 3000)
+            on = False
+        if on == self.field_mode and self.a_field.isChecked() == on:
+            return
+        if on:
+            self._set_stamp_mode(False)
+            self._set_note_mode(False)
+            if self.a_write.isChecked():
+                self._toggle_write(False)
+        self.field_mode = on
+        self.a_field.setChecked(on)
+        self._apply_tool()
+        if on:
+            rule = self.current_rule()
+            self.statusBar().showMessage(f"差し替え枠（{rule.name}）: ページ上をドラッグして枠を置きます。クリックだけでも置けます（Esc で終了）")
+        else:
+            self.statusBar().clearMessage()
+
+    def current_rule(self) -> fields.Rule:
+        """「枠のルール」で選んでいるルール。"""
+        return self.rules.get(self.cb_rule.currentData()) or self.rules.rules[0]
+
+    def _field_text(self, rule: fields.Rule) -> str:
+        """枠に今入れておく文字。決まっていないときは〔名前〕という目印。"""
+        return fields.resolve(rule) or fields.placeholder(rule.name)
+
+    def _finish_field(self, d: dict, pt: tuple[float, float]) -> str | None:
+        """ドラッグ（またはクリック）した場所に差し替え枠を置く。見た目は「書き込み」タブの文字の設定を使う。"""
+        i = d["index"]
+        a, b = d["pts"][0], pt
+        x, y = min(a[0], b[0]), min(a[1], b[1])
+        width = abs(b[0] - a[0])
+        rule = self.current_rule()
+        rb = self.ribbon
+        xref = self.model.add_text_box(i, (x, y) if width >= 24 else a, self._field_text(rule), font=rb.font_key(), fontsize=rb.fontsize(),
+                                       color=rb.color(), fill=rb.text_bg(), border=rb.text_border(),
+                                       border_style=rb.text_border_style(), border_width=rb.text_border_width(),
+                                       wrap_width=width if width >= 24 else None, field=fields.field_spec(rule))
+        self.sel_annot = (i, xref)
+        self._set_field_mode(False)         # 1 つ置いたら終わる（続けて置くときは、もう一度「枠を置く」）
+        return f"差し替え枠（{rule.name}）を置きました。ドラッグで移動、右下の四角で幅を変えられます。「差し替え印刷」で中身を入れて印刷します"
+
+    def edit_field(self, index: int, annot: dict):
+        """枠のルールを選び直す。"""
+        names = [r.name for r in self.rules.rules]
+        cur = self.rules.get(str(annot["field"].get("id")))
+        choice = self._ask_choice("差し替え枠", "この枠に入れるもの（ルール）:", names, names.index(cur.name) if cur else 0)
+        if choice is None:
+            return
+        rule = self.rules.rules[names.index(choice)]
+        try:
+            xref = self.model.set_field_rule(index, annot["xref"], fields.field_spec(rule), self._field_text(rule))
+        except Exception as e:
+            self._error(e)
+            return
+        self.sel_annot = (index, xref)
+        self._refresh_page(index)
+
+    def _ask_choice(self, title: str, label: str, items: list[str], current: int = 0) -> str | None:
+        """一覧から 1 つ選ぶ（テストではここを差し替える）。"""
+        text, ok = QInputDialog.getItem(self, title, label, items, current, False)
+        return text if ok else None
+
+    def _refresh_fields(self, redraw: bool = True) -> int:
+        """日付の枠を今日の日付に、決まった文字の枠を今のルールの内容に合わせる。変えた枠の数を返す。
+        利用者の操作ではないので、元に戻す対象にも「変更あり」にもしない。"""
+        if self.model.doc is None:
+            return 0
+        texts: dict[str, str] = {}
+        try:
+            for f in self.model.fields():
+                rule = self.rules.for_spec(f["field"])
+                if rule.kind == "date" or (rule.kind == "fixed" and rule.value):
+                    texts[rule.id] = fields.resolve(rule)
+            n = self.model.set_field_texts(texts, undo=False, mark_modified=False) if texts else 0
+        except Exception:
+            return 0                        # 更新できなくても、開くこと自体は続ける
+        if n and redraw:
+            self._select_annot(None)
+            self.refresh_thumbs(select=[self.current] if self.current >= 0 else None, keep_view=True)
+        return n
+
+    def edit_rules(self):
+        """ルールの管理。閉じたあと、枠のルールの一覧と、開いている文書の枠の中身を合わせ直す。"""
+        dlg = RulesDialog(self.rules, self, select_id=self.cb_rule.currentData())
+        if self._exec_dialog(dlg) != QDialog.Accepted:
+            return
+        self._fill_rule_combo()
+        self._refresh_fields()
+
+    def fill_print(self):
+        """差し替え印刷: 枠に入れる内容を確かめて印刷する（または別名で保存する）。開いている文書は書き換えない。"""
+        if self.model.doc is None:
+            return
+        found = self.model.fields()
+        if not found:
+            QMessageBox.information(self, "差し替え印刷", "この PDF には差し替え枠がありません。\n"
+                                    "「差し替え」タブの「枠を置く」で、日付や宛先などの枠を置いてから使います。")
+            return
+        rows: list[tuple[fields.Rule, str]] = []
+        seen: set[str] = set()
+        for f in found:
+            rule = self.rules.for_spec(f["field"])
+            if rule.id in seen:
+                continue
+            seen.add(rule.id)
+            rows.append((rule, fields.resolve(rule)))
+        dlg = FillDialog(rows, self)
+        action = self._exec_fill_dialog(dlg)
+        if action not in ("print", "save"):
+            return
+        values = dlg.values()
+        if self.rules.remember_values(values):      # 送付元・住所など、決まった文字はここで直した内容を次回も使う
+            try:
+                self.rules.save()
+            except OSError:
+                pass
+        try:
+            filled = self.model.snapshot()
+            filled.set_field_texts(values, undo=False, mark_modified=False)
+        except Exception as e:
+            self._error(e)
+            return
+        try:
+            if action == "print":
+                self.print_dialog(filled)
+            else:
+                base = os.path.splitext(os.path.basename(self.model.path))[0] if self.model.path else "無題"
+                path, _ = QFileDialog.getSaveFileName(self, "内容を入れた PDF を保存", f"{base}_{datetime.date.today():%Y%m%d}.pdf", PDF_FILTER)
+                if path:
+                    if not os.path.splitext(path)[1]:
+                        path += ".pdf"
+                    if self.model.path and os.path.abspath(path) == os.path.abspath(self.model.path):
+                        raise ValueError("開いている PDF（雛形）と同じ名前には保存できません。別の名前にしてください。")
+                    filled.save(path)
+                    self.statusBar().showMessage(f"内容を入れた PDF を保存しました: {path}", 6000)
+        except Exception as e:
+            self._error(e)
+        finally:
+            filled.close()
+        self._refresh_fields()                      # 直した「決まった文字」を、画面の枠にも反映する
+
+    def _exec_fill_dialog(self, dlg: FillDialog) -> str | None:
+        """差し替え印刷の画面を出して、押されたボタン（"print" / "save" / None）を返す（テストではここを差し替える）。"""
+        return dlg.action if dlg.exec() == QDialog.Accepted else None
 
     def edit_annot_text(self, index: int, annot: dict):
         text = self._ask_text("文字を編集", "文字:", annot["text"])
@@ -2228,6 +2478,7 @@ class MainWindow(QMainWindow):
             qp.setDevicePixelRatio(dpr)
             v.setPixmap(qp)
             v.rendered_key = key
+            v.set_field_rects([self._frac_rect(v.index, a["rect"]) for a in self.model.annots_on_page(v.index) if a.get("field")])
 
     def _on_scrolled(self):
         self._render_visible()

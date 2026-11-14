@@ -32,6 +32,7 @@ from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 import app as appmod
 import stamp_ui
 from app import MainWindow
+from pdfmodel import PdfModel
 
 SHOTS = os.environ.get("E2E_SHOTS")
 _step = [0]
@@ -630,7 +631,7 @@ def main():
     import ribbon as ribbon_mod
     w4 = MainWindow(); w4.resize(1280, 800); w4.show(); wait(50)
     rib = w4.rib
-    assert w4.menuWidget() is rib and list(rib.tabs) == ["home", "write", "view", "help"] and rib.current() == "home"
+    assert w4.menuWidget() is rib and list(rib.tabs) == ["home", "write", "fill", "view", "help"] and rib.current() == "home"
     assert not ribbon_mod.missing_icons, ribbon_mod.missing_icons
     assert rib.geometry().top() == 0 and rib.width() == w4.width(), "リボンは窓のいちばん上に、横幅いっぱいで出る"
     # 文書なし: 「書き込み」タブは選べない。開く は押せるが 保存 は押せない
@@ -642,7 +643,7 @@ def main():
     assert not b_open.icon().isNull() and b_open.text() == "開く" and "Ctrl+O" in b_open.toolTip()
     # 「ファイル」はメニュー: 開く・保存・印刷・終了 などが並ぶ
     file_items = [x.text() for x in rib.file_menu.actions() if not x.isSeparator()]
-    assert file_items == ["開く", "保存", "名前を付けて保存", "印刷...", "選択ページを抽出...", "パスワードを設定・解除...", "終了"], file_items
+    assert file_items == ["開く", "保存", "名前を付けて保存", "印刷...", "差し替え印刷...", "選択ページを抽出...", "パスワードを設定・解除...", "終了"], file_items
     # ボタンを押すと操作が実行される（開く → ファイルを選ぶ画面）
     asked_open = []
     _real_open_name = QFileDialog.getOpenFileName
@@ -676,7 +677,12 @@ def main():
     QTest.keyClick(w4, Qt.Key_F2); wait(100)
     assert w4.stamp_mode and w4.a_stamp.isChecked() and rib.button(w4.a_stamp, "home").isChecked()
     QTest.keyClick(w4, Qt.Key_Escape); wait(100)
-    assert not w4.stamp_mode
+    assert not w4.stamp_mode and not w4.a_stamp.isChecked()
+    assert not rib.button(w4.a_stamp, "home").isChecked(), "Esc で終えたら、ボタンも押されていない見た目に戻る"
+    QTest.keyClick(w4, Qt.Key_F3); wait(100)
+    assert w4.note_mode and rib.button(w4.a_note, "home").isChecked()
+    QTest.keyClick(w4, Qt.Key_Escape); wait(100)
+    assert not w4.note_mode and not rib.button(w4.a_note, "home").isChecked()
     # 書き込みタブ: 選ぶと書き込みが始まり、F4 でも出入りできる。出るときは直前のタブへ戻る
     QTest.mouseClick(rib.tabs["write"], Qt.LeftButton); wait(200)
     assert rib.current() == "write" and w4.a_write.isChecked() and w4.ribbon.isVisible()
@@ -1364,6 +1370,150 @@ def main():
         w12.a_write.trigger(); wait(100)
         assert w12.rib.current() == "home" and not w12.ribbon.isVisible()
         w12.model.modified = False; assert w12.close()
+
+    step("差し替え枠: ルール（日付・宛先・独自ルール）の枠を置く、日付は開いたとき自動で今日に、差し替え印刷で中身を入れて印刷・保存（元の PDF は変えない）")
+    import datetime as _dtm
+    import fields as fields_mod
+    from field_ui import FillDialog, RulesDialog
+    today_text = fields_mod.format_date(_dtm.date.today())
+    w13 = MainWindow(); w13.resize(1400, 900); w13.show(); wait(50)
+    rib13 = w13.rib
+    assert list(rib13.tabs) == ["home", "write", "fill", "view", "help"] and not rib13.tabs["fill"].isEnabled(), "文書なしでは差し替えタブは選べない"
+    assert not w13.a_field.isEnabled() and not w13.a_fill_print.isEnabled()
+    tpl = os.path.join(_TMP, "fax_template.pdf"); make_pdf(tpl, 2, "F")
+    w13.open_file(tpl); wait(150)
+    QTest.mouseClick(rib13.tabs["fill"], Qt.LeftButton); wait(50)
+    assert rib13.current() == "fill" and [w13.cb_rule.itemText(i) for i in range(4)] == ["日付", "宛先", "送付元", "住所"]
+    v13 = w13.view; ox, oy, pw, ph = v13.pix_geometry(); pr13 = w13.model.doc[0].rect; sc13 = pw / pr13.width
+    def P13(x, y):
+        return QPoint(int(ox + x * sc13), int(oy + y * sc13))
+    def drag13(p0, p1):
+        QTest.mousePress(v13, Qt.LeftButton, Qt.NoModifier, p0); wait(20)
+        mouse_move(v13, QPoint((p0.x() + p1.x()) // 2, (p0.y() + p1.y()) // 2), Qt.LeftButton); wait(10)
+        mouse_move(v13, p1, Qt.LeftButton); wait(10)
+        QTest.mouseRelease(v13, Qt.LeftButton, Qt.NoModifier, p1); wait(150)
+    def fields13():
+        return w13.model.fields()
+    # 日付の枠: 「枠を置く」を押してページをクリック。今日の日付が入り、1 つ置いたら終わる
+    b_field = rib13.button(w13.a_field)
+    QTest.mouseClick(b_field, Qt.LeftButton); wait(50)
+    assert w13.field_mode and b_field.isChecked() and v13.draw_mode and v13.cursor().shape() == Qt.CrossCursor
+    assert "日付" in w13.statusBar().currentMessage()
+    QTest.mouseClick(v13, Qt.LeftButton, Qt.NoModifier, P13(320, 90)); wait(150)
+    fs = fields13()
+    assert len(fs) == 1 and fs[0]["field"]["id"] == "date" and fs[0]["text"] == today_text, fs
+    assert abs(fs[0]["rect"].x0 - 320) < 3 and abs(fs[0]["rect"].y0 - 90) < 3
+    assert not w13.field_mode and not b_field.isChecked() and not v13.draw_mode and w13.sel_annot == (0, fs[0]["xref"])
+    assert len(v13.field_rects) == 1, "画面には枠の目印が出る"
+    assert w13.model.annot_info(0, fs[0]["xref"])["kind"] == "差し替え枠"
+    # 宛先の枠: ドラッグした幅で置く。中身が決まっていないので、〔宛先〕という目印が入る
+    w13.cb_rule.setCurrentIndex(w13.cb_rule.findData("to")); w13.a_field.trigger(); wait(50)
+    drag13(P13(80, 200), P13(330, 215))
+    to = [f for f in fields13() if f["field"]["id"] == "to"][0]
+    assert to["text"] == "〔宛先〕" and abs(to["rect"].width - 250) < 6 and abs(to["rect"].x0 - 80) < 3, to
+    assert len(v13.field_rects) == 2 and not w13.field_mode
+    # Esc で置くのをやめる。付箋モードとは同時にならない
+    w13.a_field.trigger(); wait(30); assert w13.field_mode
+    QTest.keyClick(w13, Qt.Key_Escape); wait(50); assert not w13.field_mode and not w13.a_field.isChecked() and len(fields13()) == 2
+    w13.a_field.trigger(); wait(30)
+    QTest.keyClick(w13, Qt.Key_F3); wait(50); assert w13.note_mode and not w13.field_mode and not w13.a_field.isChecked()
+    QTest.keyClick(w13, Qt.Key_F6); wait(50); assert w13.field_mode and not w13.note_mode, "F6 で枠を置く"
+    QTest.keyClick(w13, Qt.Key_Escape); wait(50)
+    # 置いた枠は、ふつうの書き込みと同じようにドラッグで動かせる
+    c_to = P13(to["rect"].x0 + 30, to["rect"].y0 + 8)
+    drag13(c_to, QPoint(c_to.x(), c_to.y() + int(40 * sc13)))
+    to2 = [f for f in fields13() if f["field"]["id"] == "to"][0]
+    assert abs((to2["rect"].y0 - to["rect"].y0) - 40) < 2 and abs(to2["rect"].width - to["rect"].width) < 0.5
+    # ダブルクリックで、枠のルールを選び直せる（元に戻せる）
+    asked13 = []
+    w13._ask_choice = lambda title, label, items, current=0: (asked13.append((items[current], items)), "件名")[1]
+    c_to = P13(to2["rect"].x0 + 30, to2["rect"].y0 + 8)
+    QTest.mouseDClick(v13, Qt.LeftButton, Qt.NoModifier, c_to); wait(20); QTest.mouseRelease(v13, Qt.LeftButton, Qt.NoModifier, c_to); wait(150)
+    assert asked13 and asked13[0][0] == "宛先" and "送付元" in asked13[0][1], asked13
+    assert [f["field"]["name"] for f in fields13()] == ["日付", "件名"] and [f["text"] for f in fields13()][1] == "〔件名〕"
+    QTest.keyClick(w13, Qt.Key_Z, Qt.ControlModifier); wait(100)
+    assert [f["field"]["name"] for f in fields13()] == ["日付", "宛先"]
+    v13 = w13.view; ox, oy, pw, ph = v13.pix_geometry()        # 元に戻すとページの表示を作り直すので、取り直す
+    # 独自ルール: ルールの管理で「担当者」（決まった文字）を足して、その枠を置く
+    def with_rules(change):
+        def _exec(dlg):
+            assert isinstance(dlg, RulesDialog), dlg
+            change(dlg); dlg.accept()
+            return QDialog.Accepted
+        return _exec
+    def add_tanto(dlg):
+        n0 = dlg.list.count()
+        dlg.add_rule("担当者", "fixed"); dlg.ed_value.setPlainText("外科 山田")
+        assert dlg.list.count() == n0 + 1 and dlg.list.currentItem().text() == "担当者"
+    _exec0 = w13._exec_dialog
+    w13._exec_dialog = with_rules(add_tanto)
+    QTest.mouseClick(rib13.button(w13.a_rules), Qt.LeftButton); wait(100)
+    tanto = [r for r in w13.rules.rules if r.name == "担当者"][0]
+    assert tanto.kind == "fixed" and tanto.value == "外科 山田" and w13.cb_rule.findData(tanto.id) >= 0
+    assert os.path.isfile(os.path.join(os.environ["APPDATA"], "PdfPageEditor", "rules.json")), "ルールは設定ファイルに保存する"
+    w13.cb_rule.setCurrentIndex(w13.cb_rule.findData(tanto.id)); w13.a_field.trigger(); wait(30)
+    QTest.mouseClick(v13, Qt.LeftButton, Qt.NoModifier, P13(80, 330)); wait(150)
+    assert [f["text"] for f in fields13() if f["field"]["id"] == tanto.id] == ["外科 山田"]
+    # ルールの内容を直すと、開いている文書の枠にも反映される
+    def change_tanto(dlg):
+        dlg.list.setCurrentRow([r.id for r in dlg.rules].index(tanto.id)); dlg.ed_value.setPlainText("外科 佐藤")
+    w13._exec_dialog = with_rules(change_tanto)
+    w13.a_rules.trigger(); wait(150)
+    assert [f["text"] for f in fields13() if f["field"]["id"] == tanto.id] == ["外科 佐藤"]
+    w13._exec_dialog = _exec0
+    v13 = w13.view; ox, oy, pw, ph = v13.pix_geometry()
+    assert len(v13.field_rects) == 3
+    # 雛形として保存
+    QFileDialog.getSaveFileName = staticmethod(lambda *args, **kw: (tpl, ""))
+    w13.save(); wait(100)
+    assert not w13.model.modified
+    # 差し替え印刷: 入力の画面に、日付（今日）・宛先（空）・担当者（決まった文字）が並ぶ。入れた内容で保存しても、開いている文書は変わらない
+    seen13 = []
+    def fill_with(action, to_text, tanto_text=None):
+        def _exec(dlg):
+            assert isinstance(dlg, FillDialog)
+            seen13.append(dict(dlg.values()))
+            dlg.set_value("to", to_text)
+            if tanto_text is not None:
+                dlg.set_value(tanto.id, tanto_text)
+            return action
+        return _exec
+    filled_path = os.path.join(_TMP, "fax_filled.pdf")
+    QFileDialog.getSaveFileName = staticmethod(lambda *args, **kw: (filled_path, ""))
+    w13._exec_fill_dialog = fill_with("save", "〇〇クリニック 御中\n山田 先生", "外科 鈴木")
+    QTest.mouseClick(rib13.button(w13.a_fill_print), Qt.LeftButton); wait(300)
+    assert seen13[-1] == {"date": today_text, "to": "", tanto.id: "外科 佐藤"}, seen13
+    fm = PdfModel(); fm.open(filled_path)
+    assert {f["field"]["name"]: f["text"] for f in fm.fields()} == {"日付": today_text, "宛先": "〇〇クリニック 御中\n山田 先生", "担当者": "外科 鈴木"}
+    assert fm.page_count == 2
+    fm.close()
+    assert "保存しました" in w13.statusBar().currentMessage() and w13.model.path == tpl
+    now = {f["field"]["name"]: f["text"] for f in fields13()}
+    assert now["宛先"] == "〔宛先〕" and now["担当者"] == "外科 鈴木", ("宛先は覚えない。決まった文字は直した内容を次回も使う", now)
+    assert w13.rules.get(tanto.id).value == "外科 鈴木" and w13.rules.get("to").value == "" and not w13.model.modified
+    # 印刷: Ctrl+P でも、枠があれば先に入力の画面が出る。やめれば印刷しない
+    w13._exec_fill_dialog = lambda dlg: None
+    printed13 = os.path.join(_TMP, "fax_print.pdf")
+    w13._exec_print_dialog = accept_with(printed13, lambda p: None)
+    QTest.keyClick(w13, Qt.Key_P, Qt.ControlModifier); wait(200)
+    assert not os.path.exists(printed13)
+    w13._exec_fill_dialog = fill_with("print", "△△医院 御中")
+    QTest.keyClick(w13, Qt.Key_P, Qt.ControlModifier); wait(400)
+    assert os.path.exists(printed13) and printed(printed13)[0] == 2 and "2 ページを印刷しました" in w13.statusBar().currentMessage()
+    assert {f["field"]["name"]: f["text"] for f in fields13()}["宛先"] == "〔宛先〕" and not w13.model.modified
+    # 枠が無い PDF では、差し替え印刷は案内だけ出す。ふつうの印刷はそのまま
+    assert w13.close()
+    # 日付の自動更新: 古い日付のまま保存されていた雛形を開くと、今日の日付になる（開いただけでは「変更あり」にならない）
+    old = PdfModel(); old.open(tpl)
+    assert old.set_field_texts({"date": "2020年1月1日"}) == 1
+    old.save(); old.close()
+    w14 = MainWindow(); w14.show(); wait(50)
+    w14.open_file(tpl); wait(200)
+    f14 = {f["field"]["name"]: f["text"] for f in w14.model.fields()}
+    assert f14["日付"] == today_text and f14["担当者"] == "外科 鈴木" and f14["宛先"] == "〔宛先〕", f14
+    assert not w14.model.modified and not w14.model.can_undo() and "更新しました" in w14.statusBar().currentMessage()
+    assert len(w14.view.field_rects) == 3
+    assert w14.close()
 
     step("自動アップデート: 最新なら「最新です」、新版なら更新ダイアログ、スキップは記憶、更新するとダウンロード→インストーラー起動→終了")
     import io, json
