@@ -131,6 +131,51 @@ jobs:
       - name: Build installer (Inno Setup)
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "/DAppVersion=${{ steps.ver.outputs.version }}" installer\PdfPageEditor.iss'
 
+      - name: Check that the installer can relaunch the app after an in-app update
+        # アプリ内の自動アップデートでは、動いていたアプリ（PyInstaller の 1 ファイル版 exe）の環境変数がインストーラーに引き継がれる。
+        # そのままアプリを起動し直すと、古い一時フォルダーを使おうとして「Failed to load Python DLL」で失敗する（1.5.1 までの不具合）。
+        # 同じ状況の環境変数を作り、インストーラーが /LAUNCH=1 で起動し直したアプリが画面を出せるか確かめる。失敗したら公開しない
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP 'ppe-install'
+          $exe = Join-Path $dir 'PdfPageEditor.exe'
+          $marker = Join-Path $env:RUNNER_TEMP 'ppe-started.txt'
+          $setup = (Get-ChildItem dist\PdfPageEditor-Setup-*.exe | Select-Object -First 1).FullName
+          $common = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CURRENTUSER', "/DIR=$dir"
+
+          # 1) まず普通にインストールする（起動はしない）
+          $p = Start-Process -FilePath $setup -ArgumentList $common -PassThru
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'installer did not finish' }
+          if ($p.ExitCode -ne 0 -or -not (Test-Path $exe)) { throw "install failed (exit code $($p.ExitCode))" }
+
+          # 2) 「古いアプリから引き継いだ」環境変数を再現する（一時フォルダーはもう無い）
+          $env:_PYI_ARCHIVE_FILE = $exe
+          $env:_PYI_APPLICATION_HOME_DIR = Join-Path $env:RUNNER_TEMP '_MEI_removed'
+          $env:_PYI_PARENT_PROCESS_LEVEL = '1'
+
+          # 3) 対照: この環境変数のまま exe を直接起動すると失敗する（エラー画面で止まるか、異常終了する）はず
+          $log = Join-Path $env:RUNNER_TEMP 'selftest-stale.log'
+          $c = Start-Process -FilePath $exe -ArgumentList '--selftest', $log -PassThru
+          if ($c.WaitForExit(20000)) {
+            if ($c.ExitCode -eq 0) { Write-Host '::warning::control run succeeded: the stale environment no longer breaks a direct launch, so this check proves less than intended' }
+            else { Write-Host "control: direct launch with the stale environment failed as expected (exit code $($c.ExitCode))" }
+          } else {
+            Write-Host 'control: direct launch with the stale environment is stuck on an error dialog, as expected'
+            Get-Process PdfPageEditor -ErrorAction SilentlyContinue | Stop-Process -Force
+          }
+
+          # 4) 本番: 同じ環境変数のままインストーラーを /LAUNCH=1 で実行し、起動し直されたアプリが画面を出すのを待つ
+          $env:PDFPE_STARTED_MARKER = $marker
+          $p = Start-Process -FilePath $setup -ArgumentList ($common + '/LAUNCH=1') -PassThru
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); throw 'installer did not finish' }
+          if ($p.ExitCode -ne 0) { throw "update install failed (exit code $($p.ExitCode))" }
+          $ok = $false
+          foreach ($i in 1..90) { if (Test-Path $marker) { $ok = $true; break }; Start-Sleep -Seconds 1 }
+          Get-Process PdfPageEditor -ErrorAction SilentlyContinue | Format-Table Id, MainWindowTitle, StartTime | Out-String | Write-Host
+          Get-Process PdfPageEditor -ErrorAction SilentlyContinue | Stop-Process -Force
+          if (-not $ok) { throw 'the app relaunched by the installer did not start' }
+          Write-Host "relaunched app started: version $(Get-Content $marker)"
+
       - name: List outputs
         run: Get-ChildItem dist
 

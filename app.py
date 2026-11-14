@@ -28,7 +28,7 @@ from stamps import MM, StampLibrary, config_dir, random_tilt
 import fonts
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.5.1"
+__version__ = "1.5.2"
 
 
 def resource_path(rel: str) -> str:
@@ -866,7 +866,9 @@ class MainWindow(QMainWindow):
 
     def _launch_installer(self, path: str):
         # 今動いている exe の場所（ユーザー用 / 全ユーザー用）に合わせて上書きさせる
-        subprocess.Popen(updater.installer_args(path, sys.executable), close_fds=True)
+        # 環境変数は PyInstaller 用のものを外して渡す（そのまま渡すと、更新後に起動し直したアプリが
+        # 古いアプリの一時フォルダーを使おうとして起動に失敗する）
+        subprocess.Popen(updater.installer_args(path, sys.executable), env=updater.installer_env(bundle_dir=getattr(sys, "_MEIPASS", None)), close_fds=True)
 
     def show_about(self):
         QMessageBox.about(self, f"{APP_NAME} について",
@@ -2328,7 +2330,21 @@ def main():
     w.show()
     if len(sys.argv) > 1 and os.path.isfile(sys.argv[1]):
         w.open_file(sys.argv[1])
+    _write_started_marker()
     sys.exit(app.exec())
+
+
+def _write_started_marker():
+    """PDFPE_STARTED_MARKER にファイル名が入っていれば、画面を出せた印としてバージョンを書く
+    （CI で「インストーラーが更新後にアプリを起動し直せるか」を確かめるためのもの。普段は何もしない）。"""
+    marker = os.environ.get("PDFPE_STARTED_MARKER")
+    if not marker:
+        return
+    try:
+        with open(marker, "w", encoding="utf-8") as f:
+            f.write(__version__)
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

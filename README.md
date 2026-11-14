@@ -70,6 +70,7 @@ Windows 向けの軽量 PDF ビューア + ページ編集 + 電子印鑑ツー�
 ## exe・インストーラーを自分で作る
 - ローカル: `build_windows.bat` をダブルクリック。`dist\PdfPageEditor.exe` ができ、Inno Setup 6 が入っていれば `dist\PdfPageEditor-Setup-x.y.z.exe` も作られる
 - GitHub Actions: `app.py` の `__version__` を上げて `main` にマージすると、`.github/workflows/release.yml` が Linux で全テスト（E2E 含む）を実行し、Windows でビルドして、タグ `vX.Y.Z` を打って Releases に公開する（同じバージョンのタグがすでにあればビルドのみ）
+- 1 ファイル版の exe（PyInstaller）は、起動のたびに一時フォルダー（`_MEI…`）へ中身を展開し、その場所を環境変数（`_PYI_APPLICATION_HOME_DIR` など）で子プロセスに伝える。自動アップデートでは「アプリ → インストーラー → 起動し直したアプリ」とこの環境変数が引き継がれ、新しいアプリが古い一時フォルダー（削除済み）を使おうとして `Failed to load Python DLL …\_MEI…\python312.dll` で起動に失敗していた（1.5.1 まで。更新そのものは完了している）。1.5.2 からは、アプリがインストーラーに渡す環境変数からこれらを外し（`updater.installer_env`）、インストーラーも `PYINSTALLER_RESET_ENVIRONMENT=1` を設定してからアプリを起動する（`installer/PdfPageEditor.iss` の `InitializeSetup`）。workflow の「Check that the installer can relaunch the app after an in-app update」で、同じ状況を作って毎回確かめている
 - PyMuPDF 2.x は起動時にレイアウト解析モデルを読み込もうとするため、そのまま PyInstaller にかけると `layout_rf*.yaml` が見つからず起動に失敗する。本アプリでは不要なので `--exclude-module pymupdf.layout` 等で除外している（bat と workflow に設定済み。同梱したい場合は代わりに `--collect-data pymupdf` を付ける）
 - pyinstaller-hooks-contrib 2026.10 以降は、標準のフックが PyMuPDF の付属データ（レイアウト解析用の ONNX モデルなど約 43 MB）をすべて同梱する。本アプリは使わないので、`hooks/hook-pymupdf.py`（何も同梱しないフック）を `--additional-hooks-dir hooks` で渡して置き換えている。これが無いと exe が約 116 MB になる（ある場合は約 73 MB）
 
