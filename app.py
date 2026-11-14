@@ -28,7 +28,7 @@ from stamps import MM, StampLibrary, config_dir, random_tilt
 import fonts
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.5.4"
+__version__ = "1.5.5"
 
 
 def resource_path(rel: str) -> str:
@@ -548,8 +548,7 @@ class MainWindow(QMainWindow):
         self.ribbon.markup_requested.connect(self.apply_markup)
         self.ribbon.close_requested.connect(lambda: self._toggle_write(False))
         self.ribbon.load_settings(self._settings())
-        self.addToolBarBreak(Qt.TopToolBarArea)
-        self.addToolBar(Qt.TopToolBarArea, self.ribbon)
+        self._place_ribbon()
         self.ribbon.toggleViewAction().setVisible(False)    # 右クリックメニューからは出し入れさせない（「書き込み」ボタンと状態を合わせるため）
         self.ribbon.hide()
         fmenu = self.menuBar().addMenu("ファイル(&F)")
@@ -739,6 +738,20 @@ class MainWindow(QMainWindow):
     def move_toolbar(self, area):
         self.addToolBar(area, self.toolbar)
         self.toolbar.show()
+        self._place_ribbon()
+
+    def _place_ribbon(self):
+        """書き込みリボンを、上側のツールバーの下の段（横幅いっぱい）に置き直す。
+
+        保存済みのレイアウトを復元したあとと、ツールバーを動かしたあとに必ず呼ぶ。リボンが無かった頃の版で
+        保存したレイアウトを復元すると、段の区切りが失われ、リボンがツールバーと同じ段の右端に押し込まれて
+        ほとんど見えなくなるため。
+        """
+        visible = not self.ribbon.isHidden()
+        self.removeToolBar(self.ribbon)             # いったん外して、区切り → リボンの順で最後の段に入れ直す
+        self.addToolBarBreak(Qt.TopToolBarArea)
+        self.addToolBar(Qt.TopToolBarArea, self.ribbon)
+        self.ribbon.setVisible(visible)
 
     # ------------------------------------------------------------ レイアウトの保存/復元
     def _settings(self) -> QSettings:
@@ -759,6 +772,7 @@ class MainWindow(QMainWindow):
         st = s.value("state")
         if st is not None:
             self.restoreState(st)
+        self._place_ribbon()    # 保存済みのレイアウトがどうであっても、リボンはツールバーの下の段に置く
         self.ribbon.hide()      # 書き込みリボンは「書き込み」を押したときだけ出す
         mode = s.value("display_mode", "normal")
         if mode in DISPLAY_MODES:
