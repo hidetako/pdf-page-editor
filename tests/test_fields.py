@@ -66,9 +66,23 @@ def test_rules(tmp):
     assert again.get(mine.id).value == "外科 山田" and again.get("from").value == "△△病院 外科"
     assert fields.resolve(again.get(limit.id), today) == "令和8年11月21日（土）"
     # 壊れたファイルは無視して、最初のルールで続ける
+    # 形のおかしいファイルでも落ちない（JSON としては正しいが、中身が一覧・null・数字など）
+    for body in ("{ 壊れている", "[]", "null", '"x"', "3", '{"rules": 5}', '{"rules": null}', '{"rules": []}', '{"rules": [1, "a", {"name": "番号なし"}]}'):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(body)
+        assert [r.name for r in RuleBook(path).rules] == names, body
     with open(path, "w", encoding="utf-8") as f:
-        f.write("{ 壊れている")
-    assert [r.name for r in RuleBook(path).rules] == names
+        f.write('{"rules": [1, {"id": "a", "name": "残る", "offset": [], "unknown": 1}]}')
+    assert [(r.id, r.name, r.offset) for r in RuleBook(path).rules] == [("a", "残る", 0)], "読めるものだけ読む"
+    # ルールを 1 つも無しにはできない（枠を置けなくなるため、最初のルールに戻す）
+    book = RuleBook()
+    for r in list(book.rules):
+        book.remove(r.id)
+    assert [r.name for r in book.rules] == names
+    book.set_rules([Rule("only", "これだけ")])
+    assert [r.name for r in book.rules] == ["これだけ"]
+    book.set_rules([])
+    assert [r.name for r in book.rules] == names
 
     # 差し替え印刷で入力した内容: 決まった文字は覚える。毎回入力は「覚えておく」のものだけ。日付は覚えない
     book = RuleBook()
@@ -77,6 +91,26 @@ def test_rules(tmp):
     assert book.get("from").value == "△△病院" and book.get("to").value == "" and book.get(keep.id).value == "佐藤"
     assert fields.resolve(book.get("date"), today) == "2026年11月14日"
     assert not book.remember_values({"from": "△△病院"}), "同じ内容なら変更なし"
+
+    # 決まった文字の履歴: 使った内容を新しい順に覚え、選び直せる。同じ内容は 1 つにまとめ、件数に上限がある
+    book = RuleBook(os.path.join(tmp, "cfg2", "rules.json"))
+    frm = book.get("from")
+    assert frm.history == []
+    assert book.remember_values({"from": "△△病院 外科"}) and frm.history == ["△△病院 外科"]
+    assert book.remember_values({"from": "△△病院 内科\n佐藤"}) and frm.history == ["△△病院 内科\n佐藤", "△△病院 外科"]
+    assert book.remember_values({"from": "△△病院 外科"}) and frm.history == ["△△病院 外科", "△△病院 内科\n佐藤"], "選び直すと先頭に戻る"
+    assert book.remember_values({"from": ""}) and frm.value == "" and frm.history == ["△△病院 外科", "△△病院 内科\n佐藤"], "空は履歴に入れない"
+    assert book.remember_values({"to": "〇〇クリニック"}) is False and book.get("to").history == [], "毎回入力には履歴を持たせない"
+    for i in range(fields.HISTORY_MAX + 5):
+        book.remember_values({"from": f"部署 {i}"})
+    assert len(frm.history) == fields.HISTORY_MAX and frm.history[0] == f"部署 {fields.HISTORY_MAX + 4}" and "△△病院 外科" not in frm.history
+    book.save()
+    assert RuleBook(book.path).get("from").history == frm.history, "履歴も保存される"
+    # ルールの管理で内容を書き換えたときも、今の内容が履歴に入る
+    edited = [Rule("from", "送付元", "fixed", "書き換えた内容", history=["前の内容", "前の内容", "", 3, "  "])]
+    book.set_rules(edited)
+    assert book.get("from").history == ["書き換えた内容", "前の内容"], "重複・空・文字でないものは捨てる"
+    assert Rule("a", "宛先", "ask", history=["x"]).normalized().history == [] and Rule("a", "n", "fixed", history="abc").normalized().history == []
 
     # PDF に保存する写しと、ルールが無い PC での扱い
     spec = fields.field_spec(limit)

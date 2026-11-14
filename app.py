@@ -32,7 +32,7 @@ import ribbon
 from field_ui import FillDialog, RulesDialog
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.7.0"
+__version__ = "1.7.1"
 
 
 def resource_path(rel: str) -> str:
@@ -2051,6 +2051,9 @@ class MainWindow(QMainWindow):
 
     def current_rule(self) -> fields.Rule:
         """「枠のルール」で選んでいるルール。"""
+        if not self.rules.rules:
+            self.rules.set_rules([])        # 念のため: ルールが 1 つも無ければ最初のルールに戻す
+            self._fill_rule_combo()
         return self.rules.get(self.cb_rule.currentData()) or self.rules.rules[0]
 
     def _field_text(self, rule: fields.Rule) -> str:

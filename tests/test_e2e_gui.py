@@ -1460,6 +1460,20 @@ def main():
     w13._exec_dialog = with_rules(change_tanto)
     w13.a_rules.trigger(); wait(150)
     assert [f["text"] for f in fields13() if f["field"]["id"] == tanto.id] == ["外科 佐藤"]
+    # ルールを全部消そうとしても、最後の 1 つは残る。そのあとも枠を置ける
+    def delete_all(dlg):
+        for _ in range(dlg.list.count() + 3):
+            dlg.list.setCurrentRow(0); dlg.delete_rule()
+        assert dlg.list.count() == 1 and not dlg.btn_del.isEnabled()
+    saved_rules = list(w13.rules.rules)
+    w13._exec_dialog = with_rules(delete_all)
+    w13.a_rules.trigger(); wait(150)
+    assert len(w13.rules.rules) == 1 and w13.cb_rule.count() == 1 and w13.current_rule() is w13.rules.rules[0]
+    w13.rules.rules = []                               # 設定ファイルを直接いじるなどして空になっていても落ちない
+    assert w13.current_rule().name == "日付" and w13.cb_rule.count() == len(w13.rules.rules) > 1
+    w13.a_field.trigger(); wait(30); assert w13.field_mode
+    QTest.keyClick(w13, Qt.Key_Escape); wait(30)
+    w13.rules.set_rules(saved_rules); w13.rules.save(); w13._fill_rule_combo()
     w13._exec_dialog = _exec0
     v13 = w13.view; ox, oy, pw, ph = v13.pix_geometry()
     assert len(v13.field_rects) == 3
@@ -1469,13 +1483,19 @@ def main():
     assert not w13.model.modified
     # 差し替え印刷: 入力の画面に、日付（今日）・宛先（空）・担当者（決まった文字）が並ぶ。入れた内容で保存しても、開いている文書は変わらない
     seen13 = []
-    def fill_with(action, to_text, tanto_text=None):
+    history13 = []
+    def fill_with(action, to_text, tanto_text=None, pick=None):
         def _exec(dlg):
             assert isinstance(dlg, FillDialog)
             seen13.append(dict(dlg.values()))
+            box = dlg.history_boxes.get(tanto.id)
+            history13.append([box.itemData(i) for i in range(1, box.count())] if box is not None else None)
+            assert "to" not in dlg.history_boxes and "date" not in dlg.history_boxes, "履歴は決まった文字だけ"
             dlg.set_value("to", to_text)
             if tanto_text is not None:
                 dlg.set_value(tanto.id, tanto_text)
+            if pick is not None:
+                dlg.choose_history(tanto.id, pick)
             return action
         return _exec
     filled_path = os.path.join(_TMP, "fax_filled.pdf")
@@ -1483,6 +1503,7 @@ def main():
     w13._exec_fill_dialog = fill_with("save", "〇〇クリニック 御中\n山田 先生", "外科 鈴木")
     QTest.mouseClick(rib13.button(w13.a_fill_print), Qt.LeftButton); wait(300)
     assert seen13[-1] == {"date": today_text, "to": "", tanto.id: "外科 佐藤"}, seen13
+    assert history13[-1] == ["外科 佐藤", "外科 山田"], ("決まった文字は、これまでの内容を履歴から選べる", history13)
     fm = PdfModel(); fm.open(filled_path)
     assert {f["field"]["name"]: f["text"] for f in fm.fields()} == {"日付": today_text, "宛先": "〇〇クリニック 御中\n山田 先生", "担当者": "外科 鈴木"}
     assert fm.page_count == 2
@@ -1497,10 +1518,26 @@ def main():
     w13._exec_print_dialog = accept_with(printed13, lambda p: None)
     QTest.keyClick(w13, Qt.Key_P, Qt.ControlModifier); wait(200)
     assert not os.path.exists(printed13)
-    w13._exec_fill_dialog = fill_with("print", "△△医院 御中")
+    # 履歴から「外科 山田」（3 番目）を選び直して印刷 → それが次回からの内容になり、履歴の先頭に来る
+    w13._exec_fill_dialog = fill_with("print", "△△医院 御中", pick=2)
     QTest.keyClick(w13, Qt.Key_P, Qt.ControlModifier); wait(400)
     assert os.path.exists(printed13) and printed(printed13)[0] == 2 and "2 ページを印刷しました" in w13.statusBar().currentMessage()
-    assert {f["field"]["name"]: f["text"] for f in fields13()}["宛先"] == "〔宛先〕" and not w13.model.modified
+    assert history13[-1] == ["外科 鈴木", "外科 佐藤", "外科 山田"], history13
+    assert w13.rules.get(tanto.id).value == "外科 山田" and w13.rules.get(tanto.id).history == ["外科 山田", "外科 鈴木", "外科 佐藤"]
+    now = {f["field"]["name"]: f["text"] for f in fields13()}
+    assert now["宛先"] == "〔宛先〕" and now["担当者"] == "外科 山田" and not w13.model.modified
+    # ルールの管理でも履歴から選べる
+    def pick_in_rules(dlg):
+        dlg.list.setCurrentRow([r.id for r in dlg.rules].index(tanto.id))
+        assert [dlg.cb_history.itemData(i) for i in range(1, dlg.cb_history.count())] == ["外科 山田", "外科 鈴木", "外科 佐藤"]
+        assert dlg.history_row.isVisibleTo(dlg) or not dlg.isVisible()
+        dlg.cb_history.setCurrentIndex(2); dlg._pick_history(2)
+        assert dlg.ed_value.toPlainText() == "外科 鈴木"
+    w13._exec_dialog = with_rules(pick_in_rules)
+    w13.a_rules.trigger(); wait(150)
+    w13._exec_dialog = _exec0
+    assert w13.rules.get(tanto.id).value == "外科 鈴木" and w13.rules.get(tanto.id).history[0] == "外科 鈴木"
+    assert {f["field"]["name"]: f["text"] for f in fields13()}["担当者"] == "外科 鈴木"
     # 枠が無い PDF では、差し替え印刷は案内だけ出す。ふつうの印刷はそのまま
     assert w13.close()
     # 日付の自動更新: 古い日付のまま保存されていた雛形を開くと、今日の日付になる（開いただけでは「変更あり」にならない）
