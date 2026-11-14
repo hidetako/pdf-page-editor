@@ -16,7 +16,7 @@ import tempfile
 
 from PySide6.QtCore import QByteArray, QEvent, QPoint, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QColor, QFont, QFontMetrics, QIcon, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, QSizePolicy, QStackedWidget, QToolButton,
+from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QMenu, QScrollArea, QSizePolicy, QStackedWidget, QStyleFactory, QToolButton,
                                QVBoxLayout, QWidget)
 
 ACCENT = "#C7332A"           # アプリの色（アイコンの赤）。選んだタブの文字と下線に使う
@@ -477,6 +477,11 @@ class RibbonBar(QWidget):
         super().__init__(parent)
         self.setObjectName("ribbonBar")
         self.setAttribute(Qt.WA_StyledBackground, True)
+        # 部品の下地の描き方を Fusion にそろえる。Windows 標準の描き方（版によって違う）に任せると、
+        # スタイルシートで指定していない部分（チェックボックスなど）の見た目や大きさが PC ごとに変わってしまう
+        self._base_style = QStyleFactory.create("Fusion")
+        if self._base_style is not None:
+            self.setStyle(self._base_style)
         self.setStyleSheet(style_sheet(self.fontMetrics()))
         self.pages: dict[str, RibbonPage] = {}
         self.tabs: dict[str, _Tab] = {}
