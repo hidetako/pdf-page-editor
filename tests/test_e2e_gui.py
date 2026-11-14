@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pymupdf as fitz
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QUrl, Qt
-from PySide6.QtGui import QColor, QDropEvent, QWheelEvent
+from PySide6.QtGui import QColor, QDropEvent, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
@@ -974,6 +974,11 @@ def main():
     def PP10(x, y):
         ox, oy, pw, ph = w10.view.pix_geometry()
         return QPoint(int(ox + x * pw / pr.width), int(oy + y * ph / pr.height))
+    def dclick10(pos):
+        """ダブルクリック（2 回目の押下 → その場で離す）。編集画面は、動かさずに離したときに開く。"""
+        QTest.mouseDClick(w10.view, Qt.LeftButton, Qt.NoModifier, pos); wait(20)
+        QTest.mouseRelease(w10.view, Qt.LeftButton, Qt.NoModifier, pos)
+
     def drag10(an, bn, mid=()):
         v = w10.view
         QTest.mousePress(v, Qt.LeftButton, Qt.NoModifier, an); wait(20)
@@ -1093,10 +1098,37 @@ def main():
     QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, on_ft); wait(150)
     ft = [an for an in annots10() if an["kind"] == "文字"]
     assert len(ft) == 1 and ft[0]["text"].endswith(" 済") and ft[0]["font"] == "meiryo"
-    # 選択の道具ではダブルクリックで直せる
+    # 文字の道具のまま、書いてある文字を押してそのままドラッグすると動かせる（押した瞬間に編集画面を開かない）
+    opened = []
+    w10._ask_text = lambda title, label, default="": opened.append(default) or default
+    before = ft[0]["rect"]
+    drag10(on_ft, QPoint(on_ft.x() + 60, on_ft.y() - 40)); wait(100)
+    ft = [an for an in annots10() if an["kind"] == "文字"]
+    assert not opened, "ドラッグでは編集画面を開かない"
+    assert len(ft) == 1 and abs((ft[0]["rect"].x0 - before.x0) - 60 / scale) < 2 and abs((ft[0]["rect"].y0 - before.y0) + 40 / scale) < 2, (before, ft[0]["rect"])
+    assert ft[0]["text"].endswith(" 済") and w10.view.text_mode, "中身はそのまま。道具も文字のまま"
+    # 余白をドラッグしただけでは、文字を書く画面は開かない（クリックのときだけ開く）
+    drag10(P10(0.75, 0.9), P10(0.85, 0.93)); wait(100)
+    assert not opened and len([an for an in annots10() if an["kind"] == "文字"]) == 1
+    QTest.keyClick(w10, Qt.Key_Z, Qt.ControlModifier); wait(100)      # 移動を戻す
+    ft = [an for an in annots10() if an["kind"] == "文字"]
+    assert abs(ft[0]["rect"].x0 - before.x0) < 0.5 and abs(ft[0]["rect"].y0 - before.y0) < 0.5
+    # 選択の道具: 素早く 2 回押して、そのままドラッグしても動かせる（2 回目の押下で編集画面を開かない）
     rb.tool_actions["select"].trigger(); wait()
+    QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, on_ft); wait(20)
+    QApplication.sendEvent(w10.view, QMouseEvent(QEvent.MouseButtonDblClick, QPointF(on_ft), QPointF(w10.view.mapToGlobal(on_ft)),
+                                                 Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    to = QPoint(on_ft.x() + 50, on_ft.y() + 30)
+    QApplication.sendEvent(w10.view, QMouseEvent(QEvent.MouseMove, QPointF(to), QPointF(w10.view.mapToGlobal(to)), Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+    QApplication.sendEvent(w10.view, QMouseEvent(QEvent.MouseButtonRelease, QPointF(to), QPointF(w10.view.mapToGlobal(to)), Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+    wait(100)
+    ft = [an for an in annots10() if an["kind"] == "文字"]
+    assert not opened, "2 回目の押下からのドラッグでは編集画面を開かない"
+    assert abs((ft[0]["rect"].x0 - before.x0) - 50 / scale) < 2 and abs((ft[0]["rect"].y0 - before.y0) - 30 / scale) < 2, (before, ft[0]["rect"])
+    QTest.keyClick(w10, Qt.Key_Z, Qt.ControlModifier); wait(100)
+    # 選択の道具ではダブルクリックで直せる
     w10._ask_text = lambda title, label, default="": default.replace(" 済", " 確認")
-    QTest.mouseDClick(w10.view, Qt.LeftButton, Qt.NoModifier, on_ft); wait(150)
+    dclick10(on_ft); wait(150)
     ft = [an for an in annots10() if an["kind"] == "文字"]
     assert len(ft) == 1 and ft[0]["text"].endswith(" 確認"), ft
     assert w10.sel_annot == (0, ft[0]["xref"]) and rb.context() == "text", "文字を選ぶと文字用の設定が出る"
@@ -1114,7 +1146,7 @@ def main():
     assert bn["rect"].width < an["rect"].width * 0.7 and bn["rect"].height > an["rect"].height, (an["rect"], bn["rect"])
     # 文字を空にすると消える
     w10._ask_text = lambda title, label, default="": ""
-    QTest.mouseDClick(w10.view, Qt.LeftButton, Qt.NoModifier, PP10(bn["rect"].x0 + 8, bn["rect"].y0 + 8)); wait(150)
+    dclick10(PP10(bn["rect"].x0 + 8, bn["rect"].y0 + 8)); wait(150)
     assert "文字" not in kinds10() and w10.sel_annot is None
     QTest.keyClick(w10, Qt.Key_Z, Qt.ControlModifier); wait(100)
     assert "文字" in kinds10()

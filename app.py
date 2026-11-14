@@ -28,7 +28,7 @@ from stamps import MM, StampLibrary, config_dir, random_tilt
 import fonts
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.5.5"
+__version__ = "1.5.6"
 
 
 def resource_path(rel: str) -> str:
@@ -48,6 +48,7 @@ DISPLAY_MODES = {
 }
 WARM_TINT = np.array([250, 240, 220], dtype=np.float32) / 255.0   # 白 → #FAF0DC
 NOTE_HIT_PAD = 4.0   # 付箋アイコンのクリック判定を広げる量 (pt)
+CLICK_SLOP_PX = 3          # 押してから離すまでの動きがこれ以下（画面のピクセル）なら「クリック」。それより動かしたら「ドラッグ」
 ANNOT_HIT_PAD = 2.0  # 注釈（マーカー・文字・図形など）のクリック判定を広げる量 (pt)
 HANDLE_PX = 9        # 選択した注釈の右下に出す「大きさ変更」のつまみの一辺 (px)
 TOOL_HINTS = {
@@ -132,7 +133,7 @@ class PageView(QLabel):
     drag_started = Signal(int, QPointF)      # 左ドラッグ開始（文字の選択・注釈の移動・描画）
     drag_moved = Signal(int, QPointF)
     drag_finished = Signal(int, QPointF)
-    double_clicked = Signal(int, QPointF)    # ダブルクリック（書いた文字・付箋の編集）
+    click_released = Signal(int, QPointF, bool)   # 動かさずに離した（= クリック）: ページ番号, 相対座標, ダブルクリックか
 
     def __init__(self, index: int):
         super().__init__()
@@ -153,6 +154,8 @@ class PageView(QLabel):
         self.annot_handle = False           # 右下に大きさ変更のつまみを出すか
         self.preview: dict | None = None    # 描いている途中の線・図形 {"kind", "pts"(相対座標), "color", "width"(px), "opacity", "fill"}
         self._dragging = False
+        self._press_pos = QPointF()
+        self._press_double = False
 
     def set_selection(self, rects: list[tuple[float, float, float, float]]):
         self.selection_rects = rects
@@ -163,11 +166,12 @@ class PageView(QLabel):
 
     @property
     def click_mode(self) -> bool:
-        """クリックで何かを置くモード（押印・付箋・テキスト注釈）か。"""
-        return self.stamp_mode or self.note_mode or self.text_mode
+        """押した瞬間にその場所へ置くモード（押印・付箋）か。
+        文字の道具は含めない: 書いてある文字を押してそのままドラッグで動かせるよう、離したときにクリックかどうかを決める。"""
+        return self.stamp_mode or self.note_mode
 
     def _update_cursor(self):
-        self.setCursor(Qt.CrossCursor if (self.click_mode or self.draw_mode) else Qt.ArrowCursor)
+        self.setCursor(Qt.CrossCursor if (self.click_mode or self.draw_mode or self.text_mode) else Qt.ArrowCursor)
 
     # モードの設定は、再レイアウトのたびに同じ値で呼ばれる。実際に変わったときだけカーソルを付け直す
     # （毎回付け直すと、注釈の上で出している移動カーソルなどが矢印に戻ってしまう）
@@ -243,7 +247,14 @@ class PageView(QLabel):
     def mouseReleaseEvent(self, e):
         if self._dragging and e.button() == Qt.LeftButton:
             self._dragging = False
-            self.drag_finished.emit(self.index, self._frac_clamped(e.position()))
+            pos = QPointF(e.position())
+            self.drag_finished.emit(self.index, self._frac_clamped(pos))
+            # ほとんど動かさずに離したら「クリック」。編集画面を開くなどの動作は、押した瞬間ではなくここで行う
+            # （押した瞬間に開くと、書いたものを押してそのままドラッグで動かすことができない）
+            if abs(pos.x() - self._press_pos.x()) <= CLICK_SLOP_PX and abs(pos.y() - self._press_pos.y()) <= CLICK_SLOP_PX:
+                f = self._frac(pos)
+                if f is not None:
+                    self.click_released.emit(self.index, f, self._press_double)
             return
         super().mouseReleaseEvent(e)
 
@@ -263,24 +274,29 @@ class PageView(QLabel):
         return QPointF(fx, fy) if 0 <= fx <= 1 and 0 <= fy <= 1 else None
 
     def mousePressEvent(self, e):
-        if self.click_mode and e.button() == Qt.LeftButton:
-            f = self._frac(e.position())
-            if f is not None:
-                self.clicked.emit(self.index, f)
-                return
         if e.button() == Qt.LeftButton:
             f = self._frac(e.position())
             if f is not None:
-                self._dragging = True
-                self.drag_started.emit(self.index, f)
+                if self.click_mode:
+                    self.clicked.emit(self.index, f)
+                else:
+                    self._begin_drag(e, f, double=False)
                 return
         super().mousePressEvent(e)
 
+    def _begin_drag(self, e, f: QPointF, double: bool):
+        self._dragging = True
+        self._press_pos = QPointF(e.position())
+        self._press_double = double
+        self.drag_started.emit(self.index, f)
+
     def mouseDoubleClickEvent(self, e):
-        if e.button() == Qt.LeftButton and not self.click_mode and not self.draw_mode:
+        # 素早い 2 回目の押下。ここで編集画面を開くと「選んで、すぐドラッグで動かす」ができないので、
+        # これもドラッグの始まりとして扱い、動かさずに離したときだけダブルクリックとして知らせる
+        if e.button() == Qt.LeftButton and not self.click_mode:
             f = self._frac(e.position())
             if f is not None:
-                self.double_clicked.emit(self.index, f)
+                self._begin_drag(e, f, double=not self.draw_mode and not self.text_mode)
                 return
         super().mouseDoubleClickEvent(e)
 
@@ -424,6 +440,7 @@ class MainWindow(QMainWindow):
         fonts.set_cache_file(os.path.join(config_dir(), "fonts.json"))    # フォントの確認結果を覚えておく（2 回目以降のリボン表示を速くする）
         self.sel_annot: tuple[int, int] | None = None     # 選択中の注釈 (ページ, xref)
         self._drag: dict | None = None                    # ドラッグ中の操作（描画・移動・大きさ変更）
+        self._drag_changed = False                        # 直前のドラッグで何か（移動・大きさ変更・描画・文字の選択）をしたか
         self.display_mode = "normal"
         self.auto_toc_panel = True
         self._words_cache: dict[int, list[dict]] = {}
@@ -1430,14 +1447,7 @@ class MainWindow(QMainWindow):
             self.add_note_at(index, self._page_point(index, frac))
             return
         if self.text_mode:
-            self._set_current(index)
-            pt = self._page_point(index, frac)
-            a = self.model.annot_at(index, pt, pad=ANNOT_HIT_PAD)
-            if a is not None and a["type"] == fitz.PDF_ANNOT_FREE_TEXT:
-                self._select_annot(index, a["xref"])       # 書いてある文字をクリックしたら、新しく書かずに直す
-                self.edit_annot_text(index, a)
-            else:
-                self.add_text_at(index, pt)
+            self._text_click(index, frac)
             return
         if not getattr(self, "stamp_mode", False):
             return
@@ -1544,6 +1554,8 @@ class MainWindow(QMainWindow):
                 v.setCursor(Qt.SizeFDiagCursor)
             elif note is not None or (annot is not None and annot["movable"]):
                 v.setCursor(Qt.SizeAllCursor)
+            elif v.text_mode:
+                v.setCursor(Qt.CrossCursor)
             else:
                 over_text = any(w["rect"].contains(fitz.Point(*pt)) for w in self._words(index))
                 v.setCursor(Qt.IBeamCursor if over_text and annot is None else Qt.ArrowCursor)
@@ -1585,7 +1597,32 @@ class MainWindow(QMainWindow):
                 best, best_d = i, d
         return best
 
+    def _text_click(self, index: int, frac: QPointF):
+        """文字の道具でクリックした: 書いてある文字の上なら直す。それ以外の場所なら、そこに新しく書く。"""
+        self._set_current(index)
+        pt = self._page_point(index, frac)
+        a = self.model.annot_at(index, pt, pad=ANNOT_HIT_PAD)
+        if a is not None and a["type"] == fitz.PDF_ANNOT_FREE_TEXT:
+            self._select_annot(index, a["xref"])
+            self.edit_annot_text(index, a)
+        else:
+            self.add_text_at(index, pt)
+
+    def _on_click_released(self, index: int, frac: QPointF, double: bool):
+        """ページの上で、動かさずにボタンを離した（= クリック）。ドラッグで何かをした直後は何もしない。"""
+        if self.model.doc is None or not (0 <= index < self.model.page_count) or self._drag_changed:
+            return
+        if self.text_mode:
+            self._text_click(index, frac)
+        elif double:
+            self._on_page_double_clicked(index, frac)
+
+    def _click_slop_pt(self, index: int) -> float:
+        """クリックとみなす動きの大きさを、ページ上の長さ (pt) に直したもの。"""
+        return CLICK_SLOP_PX / max(self._view_scale(index), 1e-6)
+
     def _on_drag_started(self, index: int, frac: QPointF):
+        self._drag_changed = False
         self.clear_selection()
         self._set_current(index)
         pt = self._page_point(index, frac)
@@ -1611,6 +1648,8 @@ class MainWindow(QMainWindow):
                 return
         else:
             self._select_annot(None)
+        if tool == "text":
+            return      # 文字の道具: 余白や本文の上のドラッグでは何もしない（動かさずに離したら、そこに文字を書く）
         # それ以外（余白・本文・マーカーの上）は文字の選択
         self.sel_page = index
         self.sel_anchor = pt
@@ -1675,7 +1714,8 @@ class MainWindow(QMainWindow):
                 if d["kind"] == "move":
                     a, start = d["annot"], d["start"]
                     dx, dy = pt[0] - start[0], pt[1] - start[1]
-                    if abs(dx) < 0.5 and abs(dy) < 0.5:
+                    slop = self._click_slop_pt(i)
+                    if abs(dx) <= slop and abs(dy) <= slop:
                         return                      # クリックだけ（選択のみ）
                     xref = self.model.move_annot(i, a["xref"], dx, dy)
                     self.sel_annot = (i, xref)
@@ -1683,7 +1723,8 @@ class MainWindow(QMainWindow):
                 elif d["kind"] == "resize":
                     a = d["annot"]
                     new = self._resized_rect(d, pt)
-                    if abs(new.x1 - a["rect"].x1) < 0.5 and abs(new.y1 - a["rect"].y1) < 0.5:
+                    slop = self._click_slop_pt(i)
+                    if abs(new.x1 - a["rect"].x1) <= slop and abs(new.y1 - a["rect"].y1) <= slop:
                         return
                     xref = self.model.resize_annot(i, a["xref"], new)
                     self.sel_annot = (i, xref)
@@ -1695,6 +1736,7 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 self._error(e)
                 return
+            self._drag_changed = True
             self._refresh_page(i)
             self.statusBar().showMessage(msg, 4000)
             return
@@ -1702,6 +1744,7 @@ class MainWindow(QMainWindow):
             return
         self._update_selection(self._page_point(index, frac))
         if self.selected_text:
+            self._drag_changed = True
             n = len(self.selected_text)
             self.statusBar().showMessage(f"{n} 文字を選択中。Ctrl+C でコピー、右クリックでも可", 4000)
 
@@ -2108,7 +2151,7 @@ class MainWindow(QMainWindow):
             v.set_note_mode(self.note_mode)
             v.set_text_mode(self.write_tool == "text")
             v.set_draw_mode(self.write_tool in DRAW_TOOLS)
-            v.double_clicked.connect(self._on_page_double_clicked)
+            v.click_released.connect(self._on_click_released)
             v.clicked.connect(self._on_page_clicked)
             v.context_requested.connect(self._on_page_context)
             v.hovered.connect(self._on_page_hovered)
