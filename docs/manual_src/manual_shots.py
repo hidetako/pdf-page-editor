@@ -111,15 +111,25 @@ def center_in(win, w: QWidget):
     g = w.geometry(); c = w.mapTo(win, QPoint(g.width() // 2, g.height() // 2))
     return c.x(), c.y()
 
-def tb_center(win, action):
-    """ツールバーのボタンの少し下（ラベルを隠さない位置）"""
-    w = win.toolbar.widgetForAction(action)
-    x, y = center_in(win, w)
-    return x, y + 26
+def tb_center(win, action, tab="home"):
+    """リボンのボタンのすぐ下（ラベルを隠さない位置）。ボタンのあるタブを先に選んでおくこと"""
+    w = win.rib.button(action, tab)
+    c = w.mapTo(win, QPoint(w.width() // 2, 0))
+    return c.x(), win.rib.mapTo(win, QPoint(0, win.rib.height())).y() + 12      # リボンのすぐ下（ボタンや名前を隠さない）
 
-def tb_rect(win, action):
-    w = win.toolbar.widgetForAction(action)
-    tl = w.mapTo(win, QPoint(0, 0)); return QRect(tl.x() - 2, tl.y() - 2, w.width() + 4, w.height() + 4)
+def right_of(win, w, dx=16):
+    """部品のすぐ右"""
+    c = w.mapTo(win, QPoint(w.width(), w.height() // 2)); return c.x() + dx, c.y()
+
+def title_of(win, group):
+    """リボンのグループ名のすぐ左"""
+    t = group.title
+    c = t.mapTo(win, QPoint(t.width() // 2, t.height() // 2))
+    return c.x() - t.fontMetrics().horizontalAdvance(t.text()) // 2 - 18, c.y()
+
+def rib_crop(win, extra=0):
+    """リボン全体（タブの行 + ボタンの列）"""
+    tl = win.rib.mapTo(win, QPoint(0, 0)); return QRect(0, tl.y(), win.width(), win.rib.height() + extra)
 
 win = MainWindow(); win.resize(1400, 900); win.show(); QTest.qWait(300)
 lib = win.stamp_dock_widget.lib
@@ -141,15 +151,14 @@ thumbs_c = center_in(win, win.thumbs)
 scroll_c = center_in(win, win.scroll)
 toc_c = center_in(win, win.toc_tree)
 sb = win.statusBar(); sb_c = center_in(win, win.page_label)
-mb = win.menuBar(); mb_c = (mb.mapTo(win, QPoint(60, mb.height() // 2)).x(), mb.mapTo(win, QPoint(0, mb.height() // 2)).y())
+_tab = win.rib.tabs["help"]; mb_c = (_tab.mapTo(win, QPoint(_tab.width() + 24, 0)).x(), _tab.mapTo(win, QPoint(0, _tab.height() // 2)).y())
 shot(win, "02_overview.png", callouts=[(mb_c[0], mb_c[1], 1), (tb_center(win, win.a_save)[0], tb_center(win, win.a_save)[1], 2),
                                        (toc_c[0], toc_c[1] - 150, 3), (thumbs_c[0], thumbs_c[1] - 200, 4), (scroll_c[0] + 250, scroll_c[1] - 250, 5), (sb_c[0] - 180, sb_c[1], 6)])
 
-# 3. ツールバー拡大（ページ編集ボタン）
-tl = win.toolbar.mapTo(win, QPoint(0, 0))
+# 3. リボンの拡大（ホーム タブのページ編集ボタン）
 shot(win, "03_toolbar.png", callouts=[(*tb_center(win, win.a_insert), 1), (*tb_center(win, win.a_delete), 2), (*tb_center(win, win.a_rotl), 3),
                                       (*tb_center(win, win.a_up), 4), (*tb_center(win, win.a_undo), 5)],
-     crop=QRect(0, tl.y() - 4, win.width(), win.toolbar.height() + 40))
+     crop=rib_crop(win, 28))
 
 # 4. サムネイルで 2 ページを選択（Ctrl+クリック）
 win.thumbs.item(1).setSelected(True); win.thumbs.item(2).setSelected(True); QTest.qWait(150)
@@ -231,22 +240,22 @@ v = win.view; ox, oy, pw, ph = v.pix_geometry(); pr = win.model.doc[0].rect
 def pt_of(x, y):
     q = v.mapTo(win, QPoint(int(ox + x * pw / pr.width), int(oy + y * ph / pr.height))); return q.x(), q.y()
 def rb_center(action):
-    w = rb.widgetForAction(action); c = w.mapTo(win, QPoint(w.width() // 2, w.height())); return c.x(), c.y() + 12
+    w = rb.button(action); c = w.mapTo(win, QPoint(w.width() // 2, w.height())); return c.x(), c.y() + 12
 def rb_widget(w):
     c = w.mapTo(win, QPoint(w.width() // 2, w.height())); return c.x(), c.y() + 14
-wr = win.toolbar.widgetForAction(win.a_write); wtl = wr.mapTo(win, QPoint(0, 0))
+wr = win.rib.tabs["write"]; wtl = wr.mapTo(win, QPoint(0, 0))
+home_tab = win.rib.tabs["home"]; home_c = home_tab.mapTo(win, QPoint(home_tab.width() // 2, home_tab.height() // 2))
 shot(win, "07_write.png",
-     callouts=[(*rb_center(rb.tool_actions["line"]), 1), (*rb_center(rb.markup_actions["underline"]), 2), (*rb_widget(rb.color_buttons[2]), 3),
-               (*rb_widget(rb.cb_width), 4), (*rb_center(rb.a_close), 5)],
+     callouts=[(*title_of(win, rb.groups[0]), 1), (*title_of(win, rb.groups[1]), 2), (*title_of(win, rb.groups[2]), 3),
+               (*title_of(win, rb.line_group), 4), (_tab.mapTo(win, QPoint(_tab.width() + 24, 0)).x(), home_c.y(), 5)],
      rects=[QRect(wtl.x() - 2, wtl.y() - 2, wr.width() + 4, wr.height() + 4)])
 # 7b. リボンの拡大（線の設定）
-rtl = rb.mapTo(win, QPoint(0, 0))
-shot(win, "07b_ribbon_shape.png", crop=QRect(0, rtl.y() - 2, win.width(), rb.height() + 4))
+shot(win, "07b_ribbon_shape.png", crop=rib_crop(win, 4))
 # 7c. リボンの拡大（文字の設定）
 rb.tool_actions["text"].trigger(); QTest.qWait(200)
 rb.sp_size.setValue(14); rb.cb_bg.setCurrentIndex(2); rb.chk_border.setChecked(True); rb.cb_font.setCurrentIndex(rb.cb_font.count() - 1); QTest.qWait(150)
-shot(win, "07c_ribbon_text.png", callouts=[(*rb_widget(rb.cb_font), 1), (*rb_widget(rb.sp_size), 2), (*rb_widget(rb.cb_bg), 3)],
-     crop=QRect(0, rtl.y() - 2, win.width(), rb.height() + 34))
+shot(win, "07c_ribbon_text.png", callouts=[(*right_of(win, rb.cb_font), 1), (*right_of(win, rb.sp_size), 2), (*right_of(win, rb.chk_border, 26), 3)],
+     crop=rib_crop(win, 4))
 # 7d. 選択したところ（枠と右下のつまみ）
 rb.tool_actions["select"].trigger(); QTest.qWait(150)
 sq = [a for a in win.model.annots_on_page(0) if a["kind"] == "円"][0]
@@ -256,9 +265,9 @@ shot(win, "07d_selected.png", callouts=[(c1[0] + 26, c1[1] + 4, 1)],
      crop=QRect(max(0, c0[0] - 180), max(0, c0[1] - 110), 700, 260))
 win._select_annot(None)
 # 7e. 付箋と蛍光ペン
+win.a_write.trigger(); QTest.qWait(300)       # 書き込みを終えて「ホーム」タブへ（付箋ボタンはホームにある）
 n = pt_of(470, 548); h = pt_of(100, 530)
 shot(win, "07_annots.png", callouts=[(h[0] - 30, h[1], 1), (n[0] + 30, n[1], 2), (tb_center(win, win.a_note)[0], tb_center(win, win.a_note)[1], 3)])
-win.a_write.trigger(); QTest.qWait(300)
 
 # 8. 表示モード（暖色）
 win.set_display_mode("warm"); QTest.qWait(300)
@@ -272,7 +281,7 @@ dlg.grab().save(os.path.join(OUT, "09_password.png")); dlg.hide(); print("shot 0
 
 # 10. 更新の案内
 box = QMessageBox(win); box.setWindowTitle("更新があります"); box.setIcon(QMessageBox.Information)
-box.setText(f"<b>{appmod.APP_NAME} 1.4.1</b> が公開されています（お使いのバージョンは {appmod.__version__}）。<br>ダウンロードしてインストールしますか？")
+box.setText(f"<b>{appmod.APP_NAME} 1.6.1</b> が公開されています（お使いのバージョンは {appmod.__version__}）。<br>ダウンロードしてインストールしますか？")
 b_yes = box.addButton("更新する", QMessageBox.AcceptRole); box.addButton("後で", QMessageBox.RejectRole); box.addButton("このバージョンをスキップ", QMessageBox.DestructiveRole)
 box.show(); QTest.qWait(300)
 pm = box.grab(); tl = b_yes.mapTo(box, QPoint(0, 0))

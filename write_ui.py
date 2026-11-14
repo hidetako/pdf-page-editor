@@ -1,4 +1,4 @@
-"""書き込みリボン（ツールバー）。「書き込み」ボタンを押している間だけ表示する。
+"""「書き込み」タブのリボン。タブ（F4）を選んでいる間だけ表示する。
 
 道具（選択・ペン・直線・矢印・四角・丸・文字）、マーカー、色・太さ・濃さ・塗り、フォント・文字サイズ・背景・枠をまとめる。
 文字用の設定は、文字の道具を選んでいるとき（または文字を選択しているとき）だけ表示し、それ以外では線用の設定を表示する。
@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from PySide6.QtCore import QPointF, QRectF, QSettings, QSize, Qt, Signal
 from PySide6.QtGui import QAction, QActionGroup, QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap, QPolygonF
-from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QLabel, QSizePolicy, QToolBar,
-                               QToolButton, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QGridLayout, QLabel, QToolButton, QWidget)
 
 import fonts
+import ribbon
 
 DRAW_TOOLS = ("pen", "line", "arrow", "rect", "ellipse")      # ドラッグして描く道具
 TOOLS = [
@@ -39,8 +39,22 @@ def _qcolor(c) -> QColor:
     return QColor.fromRgbF(c[0], c[1], c[2])
 
 
+TOOL_ICONS = {"select": "cursor", "pen": "ink_stroke", "line": "line", "arrow": "arrow_up_right", "rect": "rectangle_landscape",
+              "ellipse": "circle", "text": "text_t", "highlight": "highlight", "underline": "text_underline",
+              "strikeout": "text_strikethrough"}
+
+
 def tool_icon(kind: str, size: int = 26) -> QIcon:
-    """道具の絵を描く（テーマアイコンが無い Windows でも同じ見た目にするため自前で描く）。"""
+    """道具のアイコン。Fluent のアイコン（assets/icons）を使い、読めないときは自前で描く。"""
+    name = TOOL_ICONS.get(kind)
+    if name:
+        ic = ribbon.icon(name)
+        if not ic.isNull():
+            return ic
+    return _drawn_tool_icon(kind, size)
+
+
+def _drawn_tool_icon(kind: str, size: int = 26) -> QIcon:
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     p = QPainter(pm)
@@ -98,24 +112,23 @@ def _swatch_icon(color, size: int = 18) -> QIcon:
     return QIcon(pm)
 
 
-class WriteRibbon(QToolBar):
+class WriteRibbon(ribbon.RibbonPage):
+    """「書き込み」タブの中身。道具 / マーカー / 色 / 線（または文字）の設定をグループに分けて並べる。"""
+
     tool_changed = Signal(str)        # 選んだ道具
     style_changed = Signal(str)       # 変わった設定: color / width / opacity / fill / font / fontsize / textbg / border
     markup_requested = Signal(str)    # highlight / underline / strikeout
-    close_requested = Signal()
 
     def __init__(self, parent=None):
-        super().__init__("書き込み", parent)
-        self.setObjectName("writeToolBar")
-        self.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-        self.setIconSize(QSize(26, 26))
-        self.setMovable(False)
+        super().__init__(parent)
         self.ask_color = None             # 「他の色」のダイアログ（テストで差し替える）。None なら QColorDialog
         self._color = COLORS[0][1]
         self._fonts_loaded = False
         self._mute = False
+        self._context = "shape"
 
         # ---- 道具
+        g = self.add_group("道具")
         self.tool_group = QActionGroup(self)
         self.tool_group.setExclusive(True)
         self.tool_actions: dict[str, QAction] = {}
@@ -125,12 +138,12 @@ class WriteRibbon(QToolBar):
             a.setToolTip(tip); a.setStatusTip(tip)
             a.triggered.connect(lambda _=False, k=key: self._on_tool(k))
             self.tool_group.addAction(a)
-            self.addAction(a)
+            g.add_large(a)
             self.tool_actions[key] = a
         self.tool_actions["select"].setChecked(True)
-        self.addSeparator()
 
         # ---- マーカー（選択した文字に付ける）
+        g = self.add_group("マーカー")
         self.markup_actions: dict[str, QAction] = {}
         for key, label, tip in (("highlight", "蛍光ペン", "選択した文字に蛍光ペンを引く（先に文字の上をドラッグして選ぶ）"),
                                 ("underline", "下線", "選択した文字に下線を引く"),
@@ -139,91 +152,107 @@ class WriteRibbon(QToolBar):
             a.setToolTip(tip); a.setStatusTip(tip)
             a.setEnabled(False)
             a.triggered.connect(lambda _=False, k=key: self.markup_requested.emit(k))
-            self.addAction(a)
             self.markup_actions[key] = a
-        self.addSeparator()
+        g.add_column(list(self.markup_actions.values()))
 
-        # ---- 色
-        self.addWidget(QLabel(" 色 "))
+        # ---- 色（3 列 × 2 段の色見本 + 他の色）
+        g = self.add_group("色")
+        box = QWidget(g)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(2, 1, 2, 0)
+        grid.setHorizontalSpacing(1); grid.setVerticalSpacing(0)
         self.color_buttons: list[QToolButton] = []
-        for label, col in COLORS:
-            b = QToolButton(self)
-            b.setIcon(_swatch_icon(col)); b.setIconSize(QSize(18, 18))
+        for i, (label, col) in enumerate(COLORS):
+            b = QToolButton(box)
+            b.setObjectName("ribbonSwatch")
+            b.setIcon(_swatch_icon(col)); b.setIconSize(QSize(16, 16))
             b.setToolButtonStyle(Qt.ToolButtonIconOnly)
-            b.setCheckable(True); b.setAutoRaise(True)
+            b.setCheckable(True); b.setAutoRaise(True); b.setFocusPolicy(Qt.NoFocus)
             b.setToolTip(f"{label}（線・文字の色）")
             b.clicked.connect(lambda _=False, c=col: self.set_color(c, emit=True))
-            self.addWidget(b)
+            grid.addWidget(b, i // 3, i % 3)
             self.color_buttons.append(b)
-        self.btn_other = QToolButton(self)
+        self.btn_other = QToolButton(box)
+        self.btn_other.setObjectName("ribbonSmall")
         self.btn_other.setText("他の色")
         self.btn_other.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        self.btn_other.setIconSize(QSize(14, 14))
+        self.btn_other.setAutoRaise(True); self.btn_other.setFocusPolicy(Qt.NoFocus)
         self.btn_other.setToolTip("一覧に無い色を選ぶ")
         self.btn_other.clicked.connect(self._pick_other)
-        self.addWidget(self.btn_other)
-        self.addSeparator()
+        grid.addWidget(self.btn_other, 2, 0, 1, 3)
+        g.add_widget(box)
+
+        def field(text: str, parent: QWidget) -> QLabel:
+            lb = QLabel(text, parent)
+            lb.setObjectName("ribbonFieldLabel")
+            return lb
 
         # ---- 線の設定（ペン・直線・矢印・四角・丸）
-        self._shape_actions: list[QAction] = []
-        self._shape_actions.append(self.addWidget(QLabel(" 太さ ")))
-        self.cb_width = QComboBox(self)
+        self.line_group = self.add_group("線")
+        box = QWidget(self.line_group)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(4, 1, 4, 0)
+        grid.setHorizontalSpacing(6); grid.setVerticalSpacing(1)
+        self.cb_width = QComboBox(box)
         for label, w in WIDTHS:
             self.cb_width.addItem(label, w)
         self.cb_width.setCurrentIndex(1)
         self.cb_width.setToolTip("線の太さ。「マーカー」は濃さ 50% と合わせると蛍光ペンのように使える")
         self.cb_width.currentIndexChanged.connect(lambda _: self._emit("width"))
-        self._shape_actions.append(self.addWidget(self.cb_width))
-        self._shape_actions.append(self.addWidget(QLabel(" 濃さ ")))
-        self.cb_opacity = QComboBox(self)
+        self.cb_opacity = QComboBox(box)
         for label, o in OPACITIES:
             self.cb_opacity.addItem(label, o)
         self.cb_opacity.setToolTip("線の濃さ（下の文字が透けて見える度合い）")
         self.cb_opacity.currentIndexChanged.connect(lambda _: self._emit("opacity"))
-        self._shape_actions.append(self.addWidget(self.cb_opacity))
-        self.chk_fill = QCheckBox("塗りつぶす", self)
+        self.chk_fill = QCheckBox("塗りつぶす", box)
         self.chk_fill.setToolTip("四角・丸の中を、選んでいる色で塗りつぶす")
         self.chk_fill.toggled.connect(lambda _: self._emit("fill"))
-        self._shape_actions.append(self.addWidget(self.chk_fill))
+        grid.addWidget(field("太さ", box), 0, 0); grid.addWidget(self.cb_width, 0, 1)
+        grid.addWidget(field("濃さ", box), 1, 0); grid.addWidget(self.cb_opacity, 1, 1)
+        grid.addWidget(self.chk_fill, 2, 0, 1, 2)
+        self.line_group.add_widget(box)
 
         # ---- 文字の設定
-        self._text_actions: list[QAction] = []
-        self._text_actions.append(self.addWidget(QLabel(" フォント ")))
-        self.cb_font = QComboBox(self)
+        self.text_group = self.add_group("文字")
+        box = QWidget(self.text_group)
+        grid = QGridLayout(box)
+        grid.setContentsMargins(4, 1, 4, 0)
+        grid.setHorizontalSpacing(6); grid.setVerticalSpacing(1)
+        self.cb_font = QComboBox(box)
         self.cb_font.addItem(fonts.LABELS[fonts.BUILTIN], fonts.BUILTIN)
         self.cb_font.setMinimumContentsLength(9)
         self.cb_font.setToolTip("文字の書体。フォントは PDF に埋め込むので、どのパソコンで開いても同じ見た目になる")
         self.cb_font.currentIndexChanged.connect(lambda _: self._emit("font"))
-        self._text_actions.append(self.addWidget(self.cb_font))
-        self._text_actions.append(self.addWidget(QLabel(" 大きさ ")))
-        self.sp_size = QDoubleSpinBox(self)
+        self.sp_size = QDoubleSpinBox(box)
         self.sp_size.setRange(6, 96); self.sp_size.setDecimals(0); self.sp_size.setSingleStep(1); self.sp_size.setValue(12)
         self.sp_size.setSuffix(" pt")
         self.sp_size.setKeyboardTracking(False)
         self.sp_size.setToolTip("文字の大きさ")
         self.sp_size.valueChanged.connect(lambda _: self._emit("fontsize"))
-        self._text_actions.append(self.addWidget(self.sp_size))
-        self._text_actions.append(self.addWidget(QLabel(" 背景 ")))
-        self.cb_bg = QComboBox(self)
+        self.cb_bg = QComboBox(box)
         for label, c in TEXT_BGS:
             self.cb_bg.addItem(label, c)
         self.cb_bg.setToolTip("文字の後ろを塗る色。「白」にすると下の文字を隠して上書きしたように見せられる")
         self.cb_bg.currentIndexChanged.connect(lambda _: self._emit("textbg"))
-        self._text_actions.append(self.addWidget(self.cb_bg))
-        self.chk_border = QCheckBox("枠", self)
+        self.chk_border = QCheckBox("枠", box)
         self.chk_border.setToolTip("文字のまわりを線で囲む")
         self.chk_border.toggled.connect(lambda _: self._emit("border"))
-        self._text_actions.append(self.addWidget(self.chk_border))
-
-        spacer = QWidget(self)
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        self.addWidget(spacer)
-        self.a_close = QAction(tool_icon("close"), "閉じる", self)
-        self.a_close.setToolTip("書き込みを終える（Esc キーでも閉じる）")
-        self.a_close.triggered.connect(self.close_requested.emit)
-        self.addAction(self.a_close)
+        grid.addWidget(field("フォント", box), 0, 0); grid.addWidget(self.cb_font, 0, 1, 1, 3)
+        grid.addWidget(field("大きさ", box), 1, 0); grid.addWidget(self.sp_size, 1, 1)
+        grid.addWidget(field("背景", box), 2, 0); grid.addWidget(self.cb_bg, 2, 1)
+        grid.addWidget(self.chk_border, 2, 2)
+        self.text_group.add_widget(box)
 
         self.set_color(self._color)
         self.set_context("shape")
+
+    def add_action_group(self, title: str, actions: list[tuple[QAction, str]]):
+        """ウィンドウ側のアクション（選択した書き込みの削除など）を、大きいボタンのグループとして末尾に足す。"""
+        g = self.add_group(title)
+        for action, label in actions:
+            g.add_large(action, label)
+        return g
 
     # ------------------------------------------------------------ 道具
     def tool(self) -> str:
@@ -247,14 +276,12 @@ class WriteRibbon(QToolBar):
 
     def set_context(self, kind: str):
         """kind="text" なら文字の設定、"shape" なら線の設定を表示する。"""
-        text = kind == "text"
-        for a in self._text_actions:
-            a.setVisible(text)
-        for a in self._shape_actions:
-            a.setVisible(not text)
+        self._context = "text" if kind == "text" else "shape"
+        self.set_group_visible(self.text_group, self._context == "text")
+        self.set_group_visible(self.line_group, self._context != "text")
 
     def context(self) -> str:
-        return "text" if self._text_actions[0].isVisible() else "shape"
+        return self._context
 
     # ------------------------------------------------------------ 設定値
     def color(self) -> tuple[float, float, float]:

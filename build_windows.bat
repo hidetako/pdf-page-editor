@@ -7,7 +7,7 @@ call .venv\Scripts\activate.bat
 python -m pip install --upgrade pip
 pip install -r requirements.txt
 REM PyMuPDF 2.x のレイアウト解析モデル(onnx)は本アプリでは不要なので除外して軽量化する
-pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets\icon.ico --add-data "assets\icon.ico;assets" --additional-hooks-dir hooks --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
+pyinstaller --noconfirm --clean --onefile --windowed --name PdfPageEditor --icon assets\icon.ico --add-data "assets\icon.ico;assets" --add-data "assets\icons;assets\icons" --additional-hooks-dir hooks --exclude-module pymupdf.layout --exclude-module onnxruntime --exclude-module pymupdf_layout app.py
 if errorlevel 1 goto :fail
 echo.
 echo 完了: dist\PdfPageEditor.exe

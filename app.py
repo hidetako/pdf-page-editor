@@ -13,11 +13,11 @@ import numpy as np
 import pymupdf as fitz
 from PySide6.QtCore import QEvent, QItemSelectionModel, QPoint, QPointF, QRectF, QSettings, QSize, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import (QAction, QActionGroup, QColor, QDragEnterEvent, QDropEvent, QIcon, QImage,
-                           QKeySequence, QPainter, QPainterPath, QPen, QPixmap, QPolygonF)
+                           QKeySequence, QShortcut, QPainter, QPainterPath, QPen, QPixmap, QPolygonF)
 from PySide6.QtPrintSupport import QPrintDialog, QPrinter
 from PySide6.QtWidgets import (QApplication, QColorDialog, QDockWidget, QFileDialog, QHBoxLayout, QInputDialog, QLabel,
                                QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox,
-                               QPushButton, QScrollArea, QSplitter, QStatusBar, QToolBar, QToolTip,
+                               QPushButton, QScrollArea, QSplitter, QStatusBar, QToolTip,
                                QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from pdfmodel import IMAGE_EXTS, PasswordRequired, PdfModel
@@ -26,9 +26,10 @@ from write_ui import DRAW_TOOLS, WriteRibbon, tool_icon
 from stamp_ui import StampDock, png_to_qpixmap
 from stamps import MM, StampLibrary, config_dir, random_tilt
 import fonts
+import ribbon
 
 APP_NAME = "PDF Page Editor"
-__version__ = "1.5.6"
+__version__ = "1.6.0"
 
 
 def resource_path(rel: str) -> str:
@@ -549,34 +550,8 @@ class MainWindow(QMainWindow):
         self.page_label = QLabel("")
         self.statusBar().addPermanentWidget(self.page_label)
 
-        tb = QToolBar("メイン")
-        tb.setObjectName("mainToolBar")
-        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        tb.setMovable(True)   # 左端のグリップをドラッグして上下左右の辺に移動できる
-        tb.setAllowedAreas(Qt.AllToolBarAreas)
-        tb.setToolTip("右クリックで上下左右の辺に移動できます（左端のドラッグでも可）")
-        self.addToolBar(tb)
-        self.toolbar = tb
-        # 書き込みリボン（「書き込み」ボタンを押している間だけ、ツールバーの下の段に出す）
-        self.ribbon = WriteRibbon(self)
-        self.ribbon.ask_color = lambda initial, title: self._ask_color(initial, title)
-        self.ribbon.tool_changed.connect(self._on_tool_changed)
-        self.ribbon.style_changed.connect(self._on_style_changed)
-        self.ribbon.markup_requested.connect(self.apply_markup)
-        self.ribbon.close_requested.connect(lambda: self._toggle_write(False))
-        self.ribbon.load_settings(self._settings())
-        self._place_ribbon()
-        self.ribbon.toggleViewAction().setVisible(False)    # 右クリックメニューからは出し入れさせない（「書き込み」ボタンと状態を合わせるため）
-        self.ribbon.hide()
-        fmenu = self.menuBar().addMenu("ファイル(&F)")
-        emenu = self.menuBar().addMenu("編集(&E)")
-        vmenu = self.menuBar().addMenu("表示(&V)")
-        smenu = self.menuBar().addMenu("印鑑(&S)")
-        bmenu = self.menuBar().addMenu("しおり・付箋(&B)")
-        amenu = self.menuBar().addMenu("注釈(&N)")
-        hmenu = self.menuBar().addMenu("ヘルプ(&H)")
-
-        def act(text, slot, key=None, menu=None, toolbar=True, icon=None, tip=None):
+        # ---- アクション。ショートカットをどのタブでも効かせるため、すべてウィンドウに addAction する
+        def act(text, slot, key=None, icon=None, tip=None, checkable=False):
             a = QAction(text, self)
             if key:
                 a.setShortcut(QKeySequence(key))
@@ -584,114 +559,162 @@ class MainWindow(QMainWindow):
                 t = f"{tip}  [{key}]" if key else tip
                 a.setToolTip(t)
                 a.setStatusTip(t)
-            if icon:
-                a.setIcon(QIcon.fromTheme(icon))
+            if icon is not None:
+                a.setIcon(icon if isinstance(icon, QIcon) else ribbon.icon(icon))
+            a.setCheckable(checkable)
             a.triggered.connect(slot)
-            if menu is not None:
-                menu.addAction(a)
-            if toolbar:
-                tb.addAction(a)
+            self.addAction(a)
             return a
 
-        self.a_open = act("開く", self.open_dialog, "Ctrl+O", fmenu, icon="document-open", tip="PDF ファイルを開く。ウィンドウへのドラッグ&ドロップでも開けます")
-        self.a_save = act("保存", self.save, "Ctrl+S", fmenu, icon="document-save", tip="編集内容を元のファイルに上書き保存")
-        self.a_saveas = act("名前を付けて保存", self.save_as, "Ctrl+Shift+S", fmenu, icon="document-save-as", tip="別名の PDF として保存（元ファイルは変更しない）")
-        self.a_password = act("パスワードを設定・解除...", self.set_password_dialog, None, fmenu, toolbar=False,
-                              tip="保存時に PDF をパスワードで保護する。空にすると解除。パスワード付きで開いた PDF は同じパスワードで保存される")
-        fmenu.addSeparator()
-        self.a_print = act("印刷...", self.print_dialog, "Ctrl+P", fmenu, icon="document-print", tip="プリンターで印刷。すべて / 現在のページ / 選択ページ / 範囲指定、部数、用紙に合わせて拡大縮小")
-        fmenu.addSeparator()
-        self.a_extract = act("選択ページを抽出...", self.extract_selected, None, fmenu, toolbar=False, tip="選択中のページだけを新しい PDF として書き出す")
-        fmenu.addSeparator()
-        act("終了", self.close, "Ctrl+Q", fmenu, toolbar=False)
-
-        tb.addSeparator()
-        self.a_copy = act("コピー", self.copy_selection, "Ctrl+C", emenu, toolbar=False, icon="edit-copy", tip="ページ上でドラッグして選択した文字をクリップボードにコピー")
+        # ファイル
+        self.a_open = act("開く", self.open_dialog, "Ctrl+O", "folder_open", "PDF ファイルを開く。ウィンドウへのドラッグ&ドロップでも開けます")
+        self.a_save = act("保存", self.save, "Ctrl+S", "save", "編集内容を元のファイルに上書き保存")
+        self.a_saveas = act("名前を付けて保存", self.save_as, "Ctrl+Shift+S", "save_edit", "別名の PDF として保存（元ファイルは変更しない）")
+        self.a_password = act("パスワードを設定・解除...", self.set_password_dialog, None, "lock_closed",
+                              "保存時に PDF をパスワードで保護する。空にすると解除。パスワード付きで開いた PDF は同じパスワードで保存される")
+        self.a_print = act("印刷...", self.print_dialog, "Ctrl+P", "print", "プリンターで印刷。すべて / 現在のページ / 選択ページ / 範囲指定、部数、用紙に合わせて拡大縮小")
+        self.a_extract = act("選択ページを抽出...", self.extract_selected, None, "document_arrow_right", "選択中のページだけを新しい PDF として書き出す")
+        self.a_quit = act("終了", self.close, "Ctrl+Q", "arrow_exit", "アプリを終了する")
+        # 編集
+        self.a_copy = act("コピー", self.copy_selection, "Ctrl+C", "copy", "ページ上でドラッグして選択した文字をクリップボードにコピー")
         self.a_copy.setEnabled(False)
-        emenu.addSeparator()
-        self.a_undo = act("元に戻す", self.undo, "Ctrl+Z", emenu, icon="edit-undo", tip="直前の操作（並べ替え・回転・削除・挿入・押印）を取り消す")
-        self.a_redo = act("やり直し", self.redo, "Ctrl+Y", emenu, icon="edit-redo", tip="取り消した操作をもう一度実行する")
-        emenu.addSeparator()
-        tb.addSeparator()
-        self.a_insert = act("ページ挿入", self.insert_dialog, "Ctrl+I", emenu, icon="list-add", tip="他の PDF や画像(PNG/JPG など)を、選択ページの後ろにページとして挿入")
-        self.a_delete = act("削除", self.delete_selected, "Delete", emenu, icon="edit-delete", tip="選択中のページを削除（複数選択可）")
-        self.a_rotl = act("左回転", lambda: self.rotate(-90), "Ctrl+L", emenu, icon="object-rotate-left", tip="選択ページを反時計回りに 90° 回転")
-        self.a_rotr = act("右回転", lambda: self.rotate(90), "Ctrl+R", emenu, icon="object-rotate-right", tip="選択ページを時計回りに 90° 回転")
-        self.a_up = act("前へ移動", lambda: self.move(-1), "Ctrl+Up", emenu, icon="go-up", tip="選択ページを 1 つ前へ移動。サムネイルのドラッグでも並べ替えできます")
-        self.a_down = act("後へ移動", lambda: self.move(1), "Ctrl+Down", emenu, icon="go-down", tip="選択ページを 1 つ後ろへ移動")
-        emenu.addSeparator()
-        act("全選択", self.thumbs.selectAll, "Ctrl+A", emenu, toolbar=False, tip="すべてのページを選択")
-
-        tb.addSeparator()
-        self.a_stamp = act("押印モード", self._toggle_stamp_mode, "F2", smenu, icon="insert-image", tip="ON にしてページ上をクリックすると、右パネルで選んだ印鑑を押します。Esc で終了。押した印影は右クリックで取り消せます")
-        self.a_stamp.setCheckable(True)
-        a_dock = act("印鑑パネルを表示", lambda on: self.stamp_dock.setVisible(on), None, smenu, toolbar=False, tip="右側の電子印鑑パネルの表示/非表示")
-        a_dock.setCheckable(True); a_dock.setChecked(True)
-        self.stamp_dock.visibilityChanged.connect(a_dock.setChecked)
-        # メニュー/ツールバーに載せないアクションは、ウィンドウに addAction しないとショートカットが効かない
-        self.addAction(act("キャンセル（押印・付箋・書き込みの終了）", self._cancel_modes, "Esc", None, toolbar=False))
-        act("更新を確認...", lambda: self.check_for_update(manual=True), None, hmenu, toolbar=False,
-            tip="GitHub Releases に新しいバージョンがあるか調べ、あればダウンロードして更新します")
-        self.a_auto_update = act("起動時に更新を確認", self._toggle_auto_update, None, hmenu, toolbar=False,
-                                 tip="起動時に自動で新しいバージョンを調べる（インストール版のみ）")
-        self.a_auto_update.setCheckable(True)
-        self.a_auto_update.setChecked(self._settings().value("update/check_on_start", True, type=bool))
-        hmenu.addSeparator()
-        act("バージョン情報", self.show_about, None, hmenu, toolbar=False)
-
-        tb.addSeparator()
-        self.a_note = act("付箋", self._toggle_note_mode, "F3", bmenu, icon="note", tip="ON にしてページ上をクリックすると、その位置にメモ（付箋）を貼ります。Esc で終了。付箋は右クリックで編集・削除")
-        self.a_note.setCheckable(True)
-        self.a_bookmark = act("現在ページをしおりに追加", self.add_bookmark, "Ctrl+D", bmenu, icon="bookmark-new", tip="表示中のページへのしおりを目次に追加（PDF に保存される）")
-        bmenu.addSeparator()
-        self.a_toc_dock = act("目次・しおりパネルを表示", lambda on: self.toc_dock.setVisible(on), "F9", bmenu, toolbar=False, tip="左側の目次・しおりパネルの表示/非表示")
-        self.a_toc_dock.setCheckable(True)
+        self.a_undo = act("元に戻す", self.undo, "Ctrl+Z", "arrow_undo", "直前の操作（並べ替え・回転・削除・挿入・押印）を取り消す")
+        self.a_redo = act("やり直し", self.redo, "Ctrl+Y", "arrow_redo", "取り消した操作をもう一度実行する")
+        self.a_select_all = act("全選択", self.thumbs.selectAll, "Ctrl+A", "select_all_on", "すべてのページを選択")
+        # ページ
+        self.a_insert = act("ページ挿入", self.insert_dialog, "Ctrl+I", "document_add", "他の PDF や画像(PNG/JPG など)を、選択ページの後ろにページとして挿入")
+        self.a_delete = act("削除", self.delete_selected, "Delete", "delete", "選択中のページを削除（複数選択可）")
+        self.a_rotl = act("左回転", lambda: self.rotate(-90), "Ctrl+L", "arrow_rotate_counterclockwise", "選択ページを反時計回りに 90° 回転")
+        self.a_rotr = act("右回転", lambda: self.rotate(90), "Ctrl+R", "arrow_rotate_clockwise", "選択ページを時計回りに 90° 回転")
+        self.a_up = act("前へ移動", lambda: self.move(-1), "Ctrl+Up", "arrow_up", "選択ページを 1 つ前へ移動。サムネイルのドラッグでも並べ替えできます")
+        self.a_down = act("後へ移動", lambda: self.move(1), "Ctrl+Down", "arrow_down", "選択ページを 1 つ後ろへ移動")
+        # 印鑑
+        self.a_stamp = act("押印モード", self._toggle_stamp_mode, "F2", ribbon.stamp_icon(),
+                           "ON にしてページ上をクリックすると、右パネルで選んだ印鑑を押します。Esc で終了。押した印影は右クリックで取り消せます", checkable=True)
+        self.a_stamp_dock = act("印鑑パネルを表示", lambda on: self.stamp_dock.setVisible(on), None, "panel_right",
+                                "右側の電子印鑑パネルの表示/非表示", checkable=True)
+        self.a_stamp_dock.setChecked(True)
+        self.stamp_dock.visibilityChanged.connect(self.a_stamp_dock.setChecked)
+        act("キャンセル（押印・付箋・書き込みの終了）", self._cancel_modes, "Esc")
+        # しおり・付箋
+        self.a_note = act("付箋", self._toggle_note_mode, "F3", "note",
+                          "ON にしてページ上をクリックすると、その位置にメモ（付箋）を貼ります。Esc で終了。付箋は右クリックで編集・削除", checkable=True)
+        self.a_bookmark = act("現在ページをしおりに追加", self.add_bookmark, "Ctrl+D", "bookmark_add", "表示中のページへのしおりを目次に追加（PDF に保存される）")
+        self.a_toc_dock = act("目次・しおりパネルを表示", lambda on: self.toc_dock.setVisible(on), "F9", "panel_left_text",
+                              "左側の目次・しおりパネルの表示/非表示", checkable=True)
         self.toc_dock.visibilityChanged.connect(self.a_toc_dock.setChecked)
-        self.a_auto_toc = act("目次のある PDF を開いたら自動でパネルを開く", self._set_auto_toc, None, bmenu, toolbar=False, tip="索引・目次付きの PDF を開いたとき、目次パネルを自動で表示する")
-        self.a_auto_toc.setCheckable(True); self.a_auto_toc.setChecked(True)
-
-        # 書き込み: リボンを出して、ペン・図形・文字・マーカーを使う。書いたものはクリックで選び、移動・大きさ変更・削除ができる
-        self.a_write = act("書き込み", self._toggle_write, "F4", amenu, tip="書き込み用のリボン（ペン・直線・矢印・四角・丸・文字・蛍光ペン）を出す。もう一度押すか Esc で閉じる")
-        self.a_write.setCheckable(True)
-        self.a_write.setIcon(tool_icon("pen"))
-        amenu.addSeparator()
-        self.a_highlight = act("蛍光ペン", lambda: self.apply_markup("highlight"), "Ctrl+Shift+H", amenu, toolbar=False,
-                               tip="ドラッグで選択した文字に蛍光ペンを引く（PDF の注釈として保存。右クリックで色変更・削除）")
-        self.a_underline = act("下線", lambda: self.apply_markup("underline"), "Ctrl+Shift+U", amenu, toolbar=False,
-                               tip="選択した文字に下線を引く")
-        self.a_strikeout = act("取り消し線", lambda: self.apply_markup("strikeout"), "Ctrl+Shift+K", amenu, toolbar=False,
-                               tip="選択した文字に取り消し線を引く")
-        amenu.addSeparator()
-        self.a_del_annot = act("選択した書き込みを削除", self.delete_selected_annot, None, amenu, toolbar=False,
-                               tip="クリックで選んだ書き込み（線・図形・文字・マーカー）を削除する。Delete キーでも可")
+        self.a_auto_toc = act("目次のある PDF を開いたら自動でパネルを開く", self._set_auto_toc, None, None,
+                              "索引・目次付きの PDF を開いたとき、目次パネルを自動で表示する", checkable=True)
+        self.a_auto_toc.setChecked(True)
+        # 書き込み（「書き込み」タブ）。ペン・図形・文字・マーカーを使う。書いたものはクリックで選び、移動・大きさ変更・削除ができる
+        self.a_write = act("書き込み", self._toggle_write, "F4", tool_icon("pen"),
+                           "「書き込み」タブ（ペン・直線・矢印・四角・丸・文字・蛍光ペン）を開く。もう一度押すか Esc で「ホーム」に戻る", checkable=True)
+        self.a_highlight = act("蛍光ペン", lambda: self.apply_markup("highlight"), "Ctrl+Shift+H", tool_icon("highlight"),
+                               "ドラッグで選択した文字に蛍光ペンを引く（PDF の注釈として保存。右クリックで色変更・削除）")
+        self.a_underline = act("下線", lambda: self.apply_markup("underline"), "Ctrl+Shift+U", tool_icon("underline"), "選択した文字に下線を引く")
+        self.a_strikeout = act("取り消し線", lambda: self.apply_markup("strikeout"), "Ctrl+Shift+K", tool_icon("strikeout"), "選択した文字に取り消し線を引く")
+        self.a_del_annot = act("選択した書き込みを削除", self.delete_selected_annot, None, "delete",
+                               "クリックで選んだ書き込み（線・図形・文字・マーカー）を削除する。Delete キーでも可")
         self.a_del_annot.setEnabled(False)
         for a in (self.a_highlight, self.a_underline, self.a_strikeout):
             a.setEnabled(False)
-
-        tb.addSeparator()
-        mode_menu = vmenu.addMenu("表示モード")
+        # 表示
         self.mode_group = QActionGroup(self)
         self.mode_actions: dict[str, QAction] = {}
+        mode_icons = {"normal": "document", "warm": "lightbulb", "invert": "dark_theme"}
         for key, (label, _bg, tip) in DISPLAY_MODES.items():
-            a = QAction(label, self)
-            a.setCheckable(True)
-            a.setToolTip(tip); a.setStatusTip(tip)
-            a.triggered.connect(lambda _=False, k=key: self.set_display_mode(k))
-            self.mode_group.addAction(a); mode_menu.addAction(a)
+            a = act(label, lambda _=False, k=key: self.set_display_mode(k), None, mode_icons.get(key), tip, checkable=True)
+            self.mode_group.addAction(a)
             self.mode_actions[key] = a
         self.mode_actions["normal"].setChecked(True)
-        vmenu.addSeparator()
-        act("縮小", lambda: self.zoom_step(-1), "Ctrl+-", vmenu, icon="zoom-out", tip="表示を縮小。Ctrl+マウスホイールでも可")
-        act("拡大", lambda: self.zoom_step(1), "Ctrl+=", vmenu, icon="zoom-in", tip="表示を拡大。Ctrl+マウスホイールでも可")
-        act("幅に合わせる", self.zoom_fit, "Ctrl+0", vmenu, icon="zoom-fit-best", tip="ページ幅をウィンドウに合わせて表示")
-        act("100%", lambda: self.set_zoom(1.0), "Ctrl+1", vmenu, toolbar=False, tip="原寸(100%)で表示")
-        vmenu.addSeparator()
-        act("前のページ", lambda: self.goto(self.current - 1), "PgUp", vmenu, toolbar=False, tip="前のページを表示")
-        act("次のページ", lambda: self.goto(self.current + 1), "PgDown", vmenu, toolbar=False, tip="次のページを表示")
+        self.a_zoom_out = act("縮小", lambda: self.zoom_step(-1), "Ctrl+-", "zoom_out", "表示を縮小。Ctrl+マウスホイールでも可")
+        self.a_zoom_in = act("拡大", lambda: self.zoom_step(1), "Ctrl+=", "zoom_in", "表示を拡大。Ctrl+マウスホイールでも可")
+        self.a_zoom_fit = act("幅に合わせる", self.zoom_fit, "Ctrl+0", "arrow_autofit_width", "ページ幅をウィンドウに合わせて表示")
+        self.a_zoom_100 = act("100%", lambda: self.set_zoom(1.0), "Ctrl+1", "page_fit", "原寸(100%)で表示")
+        self.a_prev_page = act("前のページ", lambda: self.goto(self.current - 1), "PgUp", "arrow_circle_up", "前のページを表示")
+        self.a_next_page = act("次のページ", lambda: self.goto(self.current + 1), "PgDown", "arrow_circle_down", "次のページを表示")
+        # ヘルプ
+        self.a_check_update = act("更新を確認...", lambda: self.check_for_update(manual=True), None, "arrow_sync",
+                                  "GitHub Releases に新しいバージョンがあるか調べ、あればダウンロードして更新します")
+        self.a_auto_update = act("起動時に更新を確認", self._toggle_auto_update, None, None,
+                                 "起動時に自動で新しいバージョンを調べる（インストール版のみ）", checkable=True)
+        self.a_auto_update.setChecked(self._settings().value("update/check_on_start", True, type=bool))
+        self.a_about = act("バージョン情報", self.show_about, None, "info", "このアプリのバージョンとライセンス")
+
+        self._build_ribbon()
 
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
         self._resize_timer.timeout.connect(lambda: (self._relayout_keep_page(), self._refresh_ghost()))
+
+    def _build_ribbon(self):
+        """画面上部を Microsoft 365 風にする: タブの行（ファイル / ホーム / 書き込み / 表示 / ヘルプ）と、タブごとのリボン。"""
+        rb = self.rib = ribbon.RibbonBar(self)
+        self._last_tab = "home"
+
+        # 「ファイル」はメニューを開く（365 の Backstage 画面の代わり）
+        fm = rb.add_file_menu("ファイル")
+        for a in (self.a_open, self.a_save, self.a_saveas, None, self.a_print, self.a_extract, self.a_password, None, self.a_quit):
+            fm.addSeparator() if a is None else fm.addAction(a)
+        QShortcut(QKeySequence("Alt+F"), self, activated=rb.show_file_menu)
+
+        home = rb.add_tab("home", "ホーム")
+        g = home.add_group("ファイル")
+        g.add_large(self.a_open); g.add_large(self.a_save); g.add_large(self.a_saveas, "名前を付けて\n保存"); g.add_large(self.a_print, "印刷")
+        g = home.add_group("編集")
+        g.add_large(self.a_undo); g.add_large(self.a_redo)
+        g.add_column([self.a_copy, self.a_select_all])
+        g = home.add_group("ページ")
+        g.add_large(self.a_insert, "ページ\n挿入"); g.add_large(self.a_delete)
+        g.add_column([self.a_rotl, self.a_rotr, (self.a_extract, "抽出")])
+        g.add_column([self.a_up, self.a_down])
+        g = home.add_group("印鑑")
+        g.add_large(self.a_stamp, "押印\nモード"); g.add_large(self.a_stamp_dock, "印鑑\nパネル")
+        g = home.add_group("しおり・付箋")
+        g.add_large(self.a_note); g.add_large(self.a_bookmark, "しおりに\n追加"); g.add_large(self.a_toc_dock, "目次\nパネル")
+
+        # 「書き込み」タブ: 選んでいる間だけ書き込みの道具が使える（F4 でも開く）
+        self.ribbon = WriteRibbon()
+        self.ribbon.ask_color = lambda initial, title: self._ask_color(initial, title)
+        self.ribbon.tool_changed.connect(self._on_tool_changed)
+        self.ribbon.style_changed.connect(self._on_style_changed)
+        self.ribbon.markup_requested.connect(self.apply_markup)
+        self.ribbon.load_settings(self._settings())
+        self.ribbon.add_action_group("編集", [(self.a_del_annot, "削除"), (self.a_undo, None), (self.a_redo, None)])
+        rb.add_tab("write", "書き込み", self.ribbon)
+
+        view = rb.add_tab("view", "表示")
+        g = view.add_group("ズーム")
+        g.add_large(self.a_zoom_out); g.add_large(self.a_zoom_in); g.add_large(self.a_zoom_fit, "幅に\n合わせる"); g.add_large(self.a_zoom_100)
+        g = view.add_group("表示モード")
+        for key, short in (("normal", "ノーマル"), ("warm", "暖色"), ("invert", "白黒反転")):
+            if key in self.mode_actions:
+                g.add_large(self.mode_actions[key], short)
+        g = view.add_group("ページ移動")
+        g.add_large(self.a_prev_page, "前の\nページ"); g.add_large(self.a_next_page, "次の\nページ")
+        g = view.add_group("パネル")
+        g.add_large(self.a_toc_dock, "目次\nパネル"); g.add_large(self.a_stamp_dock, "印鑑\nパネル")
+        g.add_column([ribbon.RibbonCheck(self.a_auto_toc, "目次のある PDF では\n自動で目次パネルを開く")])
+
+        hp = rb.add_tab("help", "ヘルプ")
+        g = hp.add_group("更新")
+        g.add_large(self.a_check_update, "更新を\n確認")
+        g.add_column([ribbon.RibbonCheck(self.a_auto_update, "起動時に更新を確認")])
+        g = hp.add_group("情報")
+        g.add_large(self.a_about, "バージョン\n情報")
+
+        rb.tab_changed.connect(self._on_tab_changed)
+        self.setMenuWidget(rb)
+
+    def _on_tab_changed(self, key: str):
+        """タブを切り替えた。「書き込み」タブを選んでいる間だけ、書き込みの道具を使える状態にする。"""
+        if key == "write":
+            if not self.a_write.isChecked():
+                self._toggle_write(True)
+        else:
+            self._last_tab = key
+            if self.a_write.isChecked():
+                self._toggle_write(False)
 
     # ------------------------------------------------------------ 状態
     def _update_actions(self):
@@ -700,8 +723,9 @@ class MainWindow(QMainWindow):
         for a in (self.a_save, self.a_saveas, self.a_insert, self.a_print, self.a_note, self.a_write, self.a_password,
                   self.a_bookmark, self.btn_bm_add):
             a.setEnabled(has)
-        if not has and self.ribbon.isVisible():
+        if not has and self.a_write.isChecked():
             self._toggle_write(False)
+        self.rib.set_tab_enabled("write", has)
         self.a_del_annot.setEnabled(has and self.sel_annot is not None)
         has_toc_sel = has and self.toc_tree.currentItem() is not None
         self.btn_bm_rename.setEnabled(has_toc_sel)
@@ -740,36 +764,6 @@ class MainWindow(QMainWindow):
         else:
             event.ignore()
 
-    def createPopupMenu(self) -> QMenu:
-        """ツールバーやドックのタイトルを右クリックしたときのメニュー。ツールバーの置き場所を選べる。"""
-        menu = super().createPopupMenu() or QMenu(self)
-        menu.addSeparator()
-        cur = self.toolBarArea(self.toolbar)
-        for label, area in (("ツールバーを上へ", Qt.TopToolBarArea), ("ツールバーを下へ", Qt.BottomToolBarArea),
-                            ("ツールバーを左へ", Qt.LeftToolBarArea), ("ツールバーを右へ", Qt.RightToolBarArea)):
-            act = menu.addAction(label, lambda a=area: self.move_toolbar(a))
-            act.setCheckable(True)
-            act.setChecked(area == cur)
-        return menu
-
-    def move_toolbar(self, area):
-        self.addToolBar(area, self.toolbar)
-        self.toolbar.show()
-        self._place_ribbon()
-
-    def _place_ribbon(self):
-        """書き込みリボンを、上側のツールバーの下の段（横幅いっぱい）に置き直す。
-
-        保存済みのレイアウトを復元したあとと、ツールバーを動かしたあとに必ず呼ぶ。リボンが無かった頃の版で
-        保存したレイアウトを復元すると、段の区切りが失われ、リボンがツールバーと同じ段の右端に押し込まれて
-        ほとんど見えなくなるため。
-        """
-        visible = not self.ribbon.isHidden()
-        self.removeToolBar(self.ribbon)             # いったん外して、区切り → リボンの順で最後の段に入れ直す
-        self.addToolBarBreak(Qt.TopToolBarArea)
-        self.addToolBar(Qt.TopToolBarArea, self.ribbon)
-        self.ribbon.setVisible(visible)
-
     # ------------------------------------------------------------ レイアウトの保存/復元
     def _settings(self) -> QSettings:
         return QSettings("PdfPageEditor", "PdfPageEditor")
@@ -789,8 +783,6 @@ class MainWindow(QMainWindow):
         st = s.value("state")
         if st is not None:
             self.restoreState(st)
-        self._place_ribbon()    # 保存済みのレイアウトがどうであっても、リボンはツールバーの下の段に置く
-        self.ribbon.hide()      # 書き込みリボンは「書き込み」を押したときだけ出す
         mode = s.value("display_mode", "normal")
         if mode in DISPLAY_MODES:
             self.set_display_mode(mode)
@@ -1228,10 +1220,14 @@ class MainWindow(QMainWindow):
         self.a_write.blockSignals(True); self.a_write.setChecked(on); self.a_write.blockSignals(False)
         if not on and self.ribbon.tool() != "select":
             self.ribbon.blockSignals(True); self.ribbon.set_tool("select"); self.ribbon.blockSignals(False)
-        self.ribbon.setVisible(on)
+        # 「書き込み」タブを開く / 元のタブへ戻す（タブ側からの切り替えで呼ばれたときは、すでにそのタブになっている）
+        if on:
+            self.rib.set_current("write")
+        elif self.rib.current() == "write":
+            self.rib.set_current(self._last_tab)
         self._apply_tool()
         if on:
-            self.statusBar().showMessage("書き込み: 上のリボンで道具を選びます。閉じるには「閉じる」か Esc")
+            self.statusBar().showMessage("書き込み: 上のリボンで道具を選びます。終えるには「ホーム」タブか Esc")
         else:
             self.statusBar().clearMessage()
         # リボンの出し入れでページの表示幅は変わらないが、高さが変わるので見えている範囲を描き直す
@@ -2399,7 +2395,8 @@ def _write_started_marker():
         return
     try:
         with open(marker, "w", encoding="utf-8") as f:
-            f.write(__version__)
+            # 配布物にアイコンを入れ忘れると起動はできても絵が出ないので、読めなかった数も書く
+            f.write(f"{__version__} missing_icons={len(ribbon.missing_icons)}")
     except OSError:
         pass
 

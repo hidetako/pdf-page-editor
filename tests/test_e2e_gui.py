@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import numpy as np
 import pymupdf as fitz
 from PySide6.QtCore import QEvent, QMimeData, QPoint, QPointF, QUrl, Qt
-from PySide6.QtGui import QColor, QDropEvent, QMouseEvent, QWheelEvent
+from PySide6.QtGui import QColor, QDropEvent, QFont, QMouseEvent, QWheelEvent
 from PySide6.QtTest import QTest
 from PySide6.QtWidgets import QApplication, QDialog, QFileDialog, QMessageBox
 
@@ -623,30 +623,132 @@ def main():
     assert win2.close()
     assert texts(b)[1] == [0, 0], "Discard では保存されない"
 
-    step("ツールバー: 左辺へ移動して閉じると、次回起動時に位置が復元される")
+    step("リボン: タブ（ファイル / ホーム / 書き込み / 表示 / ヘルプ）でリボンが替わる。ボタンは操作に連動し、ショートカットはどのタブでも効く")
     from PySide6.QtCore import QSettings
     QSettings.setDefaultFormat(QSettings.IniFormat)
     QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, os.path.join(_TMP, "qsettings"))
-    w4 = MainWindow(); w4.show(); wait(50)
-    assert w4.toolbar.isMovable() and w4.toolBarArea(w4.toolbar) == Qt.TopToolBarArea
-    # 右クリックメニュー（createPopupMenu）に上下左右の項目があり、選ぶと移動する。現在位置にチェック
-    def popup_items(w):
-        return {x.text(): x for x in w.createPopupMenu().actions() if x.text().startswith("ツールバーを")}
-    items = popup_items(w4)
-    assert set(items) == {"ツールバーを上へ", "ツールバーを下へ", "ツールバーを左へ", "ツールバーを右へ"}
-    assert items["ツールバーを上へ"].isChecked() and not items["ツールバーを左へ"].isChecked()
-    items["ツールバーを左へ"].trigger(); wait()
-    assert w4.toolBarArea(w4.toolbar) == Qt.LeftToolBarArea and w4.toolbar.isVisible()
-    assert popup_items(w4)["ツールバーを左へ"].isChecked()
-    popup_items(w4)["ツールバーを右へ"].trigger(); wait()
-    assert w4.toolBarArea(w4.toolbar) == Qt.RightToolBarArea
-    popup_items(w4)["ツールバーを左へ"].trigger(); wait()
+    import ribbon as ribbon_mod
+    w4 = MainWindow(); w4.resize(1280, 800); w4.show(); wait(50)
+    rib = w4.rib
+    assert w4.menuWidget() is rib and list(rib.tabs) == ["home", "write", "view", "help"] and rib.current() == "home"
+    assert not ribbon_mod.missing_icons, ribbon_mod.missing_icons
+    assert rib.geometry().top() == 0 and rib.width() == w4.width(), "リボンは窓のいちばん上に、横幅いっぱいで出る"
+    # 文書なし: 「書き込み」タブは選べない。開く は押せるが 保存 は押せない
+    assert not rib.tabs["write"].isEnabled()
+    QTest.mouseClick(rib.tabs["write"], Qt.LeftButton); wait()
+    assert rib.current() == "home" and not w4.a_write.isChecked()
+    b_open, b_save = rib.button(w4.a_open), rib.button(w4.a_save)
+    assert b_open.isVisible() and b_open.isEnabled() and b_save.isVisible() and not b_save.isEnabled()
+    assert not b_open.icon().isNull() and b_open.text() == "開く" and "Ctrl+O" in b_open.toolTip()
+    # 「ファイル」はメニュー: 開く・保存・印刷・終了 などが並ぶ
+    file_items = [x.text() for x in rib.file_menu.actions() if not x.isSeparator()]
+    assert file_items == ["開く", "保存", "名前を付けて保存", "印刷...", "選択ページを抽出...", "パスワードを設定・解除...", "終了"], file_items
+    # ボタンを押すと操作が実行される（開く → ファイルを選ぶ画面）
+    asked_open = []
+    _real_open_name = QFileDialog.getOpenFileName
+    QFileDialog.getOpenFileName = staticmethod(lambda *args, **kw: (asked_open.append(1) or "", ""))
+    try:
+        QTest.mouseClick(b_open, Qt.LeftButton); wait()
+    finally:
+        QFileDialog.getOpenFileName = _real_open_name
+    assert asked_open, "「開く」ボタンでファイルを選ぶ画面が出る"
+    w4.open_file(a); wait(100)
+    assert rib.tabs["write"].isEnabled() and b_save.isEnabled()
+    top0 = w4.centralWidget().geometry().top()
+    # 表示タブ: リボンの中身が替わる。ホームのボタンは隠れ、拡大・縮小が出る。リボンの高さは変わらない（ページが上下に動かない）
+    QTest.mouseClick(rib.tabs["view"], Qt.LeftButton); wait()
+    assert rib.current() == "view" and not b_open.isVisible() and rib.button(w4.a_zoom_in).isVisible()
+    assert w4.centralWidget().geometry().top() == top0
+    z0 = w4.zoom if not w4.fit_width else None
+    QTest.mouseClick(rib.button(w4.a_zoom_in), Qt.LeftButton); wait(100)
+    assert not w4.fit_width and (z0 is None or w4.zoom > z0), "拡大ボタンで拡大する"
+    # 排他のボタン（表示モード）: 押したものだけが選ばれた見た目になる
+    b_warm, b_normal = rib.button(w4.mode_actions["warm"]), rib.button(w4.mode_actions["normal"])
+    QTest.mouseClick(b_warm, Qt.LeftButton); wait(100)
+    assert w4.display_mode == "warm" and b_warm.isChecked() and not b_normal.isChecked()
+    QTest.mouseClick(b_warm, Qt.LeftButton); wait(100)
+    assert w4.display_mode == "warm" and b_warm.isChecked(), "選択中をもう一度押しても選ばれたまま"
+    QTest.mouseClick(b_normal, Qt.LeftButton); wait(100)
+    assert w4.display_mode == "normal" and b_normal.isChecked() and not b_warm.isChecked()
+    # ショートカットは、ボタンが見えていないタブでも効く（F2 = 押印モード、Ctrl+D = しおり）
+    QTest.mouseClick(rib.tabs["help"], Qt.LeftButton); wait()
+    assert rib.current() == "help" and rib.button(w4.a_about).isVisible()
+    QTest.keyClick(w4, Qt.Key_F2); wait(100)
+    assert w4.stamp_mode and w4.a_stamp.isChecked() and rib.button(w4.a_stamp, "home").isChecked()
+    QTest.keyClick(w4, Qt.Key_Escape); wait(100)
+    assert not w4.stamp_mode
+    # 書き込みタブ: 選ぶと書き込みが始まり、F4 でも出入りできる。出るときは直前のタブへ戻る
+    QTest.mouseClick(rib.tabs["write"], Qt.LeftButton); wait(200)
+    assert rib.current() == "write" and w4.a_write.isChecked() and w4.ribbon.isVisible()
+    assert w4.centralWidget().geometry().top() == top0
+    QTest.keyClick(w4, Qt.Key_F4); wait(100)
+    assert rib.current() == "help" and not w4.a_write.isChecked() and not w4.ribbon.isVisible()
+    QTest.keyClick(w4, Qt.Key_F4); wait(200)
+    assert rib.current() == "write" and w4.a_write.isChecked()
+    QTest.mouseClick(rib.tabs["home"], Qt.LeftButton); wait(100)
+    assert rib.current() == "home" and not w4.a_write.isChecked() and w4.write_tool == "select"
+    # 押印モードに入ると、書き込みタブから抜ける
+    w4.a_write.trigger(); wait(200)
+    assert rib.current() == "write"
+    w4.a_stamp.trigger(); wait(100)
+    assert w4.stamp_mode and not w4.a_write.isChecked() and rib.current() == "home"
+    w4.a_stamp.trigger(); wait(100)
+    # 窓を狭くすると、リボンの右端に続きを見るボタンが出て、送ると隠れていたボタンが見える
+    w4.resize(700, 600); wait(100)
+    strip = rib._strips["home"]
+    assert strip._right.isVisible() and not strip._left.isVisible()
+    for _ in range(12):
+        QTest.mouseClick(strip._right, Qt.LeftButton); wait(10)
+    assert strip._left.isVisible() and not strip._right.isVisible()
+    w4.resize(1280, 800); wait(100)
+    assert not strip._right.isVisible() and not strip._left.isVisible()
+    # 文書を閉じる代わりに、設定のチェック（ヘルプ > 起動時に更新を確認）がアクションと連動することを見る
+    chk = [c for c in rib.pages["help"].findChildren(ribbon_mod.RibbonCheck)][0]
+    before = w4.a_auto_update.isChecked()
+    assert chk.isChecked() == before
+    w4.a_auto_update.trigger(); wait()
+    assert chk.isChecked() == (not before)
+    w4.a_auto_update.trigger(); wait()
     w4.stamp_dock.hide()
+    w4.model.modified = False
     assert w4.close()
+    # 文字が大きい PC でも、グループ名やボタンの文字が切れない（高さを決め打ちにしていない）
+    def ribbon_fits(w):
+        problems = []
+        body = w.rib.body
+        for key, page in w.rib.pages.items():
+            if not w.rib.tabs[key].isEnabled():
+                continue
+            w.rib.set_current(key); wait(30)
+            for g in page.groups:
+                if not g.isVisible():
+                    continue
+                bottom = g.title.mapTo(body, QPoint(0, g.title.height())).y()
+                if bottom > body.height() or g.title.height() < g.title.fontMetrics().height() - 1:
+                    problems.append((key, g.title.text(), "グループ名が切れている", bottom, body.height()))
+                for btn in g.buttons.values():
+                    if btn.isVisible() and (btn.height() < btn.sizeHint().height() or btn.width() < btn.sizeHint().width()):
+                        problems.append((key, btn.text(), "ボタンの文字が切れている", btn.size(), btn.sizeHint()))
+        w.rib.set_current("home"); wait(30)
+        return problems
+    _font0 = QApplication.font()
+    try:
+        for _pt in (_font0.pointSizeF(), 13.0, 8.0):
+            _f = QFont(_font0); _f.setPointSizeF(_pt); QApplication.setFont(_f)
+            wf = MainWindow(); wf.resize(1600, 800); wf.show(); wait(50)
+            wf.open_file(a); wait(100)
+            assert not ribbon_fits(wf), (_pt, ribbon_fits(wf))
+            tops = set()
+            for key in ("home", "view", "help", "write"):
+                wf.rib.set_current(key); wait(50); tops.add(wf.centralWidget().geometry().top())
+            assert len(tops) == 1, ("タブを替えてもリボンの高さは同じ", _pt, tops)
+            wf.model.modified = False; assert wf.close()
+    finally:
+        QApplication.setFont(_font0)
     w5 = MainWindow(); w5.show(); wait(50)
-    assert w5.toolBarArea(w5.toolbar) == Qt.LeftToolBarArea, "ツールバー位置が復元される"
+    assert w5.rib.current() == "home", "起動時はホーム"
     assert not w5.stamp_dock.isVisible(), "印鑑パネルは起動時は常に非表示"
-    w5.addToolBar(Qt.TopToolBarArea, w5.toolbar); w5.stamp_dock.show(); assert w5.close()
+    w5.stamp_dock.show(); assert w5.close()
     w5b = MainWindow(); w5b.show(); wait(50)
     assert not w5b.stamp_dock.isVisible(), "前回表示したまま終了しても、起動時は非表示"
     assert w5b.close()
@@ -1167,9 +1269,9 @@ def main():
     assert w10.note_mode and not rb.isVisible()
     QTest.keyClick(w10, Qt.Key_F4); wait(100)
     assert rb.isVisible() and not w10.note_mode and w10.write_tool == "select"
-    # 「閉じる」ボタン、Esc 2 回（道具 → リボン）
-    rb.a_close.trigger(); wait()
-    assert not rb.isVisible() and not w10.a_write.isChecked()
+    # 「ホーム」タブを選ぶと書き込みを終える。Esc は 2 回（道具 → タブ）
+    QTest.mouseClick(w10.rib.tabs["home"], Qt.LeftButton); wait()
+    assert not rb.isVisible() and not w10.a_write.isChecked() and w10.rib.current() == "home"
     w10.a_write.trigger(); wait(); rb.tool_actions["pen"].trigger(); wait()
     QTest.keyClick(w10, Qt.Key_Escape); wait()
     assert rb.isVisible() and w10.write_tool == "select"
@@ -1203,35 +1305,26 @@ def main():
     assert w11.ribbon.isVisible() and w11.ribbon.font_key() == "builtin"
     w11.model.modified = False; assert w11.close()
 
-    step("書き込みリボンの位置: 以前の版で保存したレイアウトからでも、ツールバーの下の段に横幅いっぱいで出る。ツールバーを動かしても同じ")
+    step("以前の版から更新: ツールバーがあった頃に保存したレイアウトが残っていても、リボンは崩れず、書き込みタブが使える")
     from PySide6.QtWidgets import QMainWindow, QToolBar
-
-    def ribbon_row(w):
-        """リボンが上側の独立した段に、横幅いっぱいで出ているか。ツールバーが上にあるときは、その下の段か。"""
-        tb, rb = w.toolbar.geometry(), w.ribbon.geometry()
-        return (w.ribbon.isVisible() and w.toolBarArea(w.ribbon) == Qt.TopToolBarArea and rb.width() >= w.width() - 4
-                and (w.toolBarArea(w.toolbar) != Qt.TopToolBarArea or rb.top() >= tb.bottom()))
-
-    # リボンが無かった頃（1.4.0 以前）に保存されたレイアウト。そのまま復元すると、リボンがツールバーと同じ段の右端に押し込まれていた
-    _old = QMainWindow(); _t = QToolBar("メイン"); _t.setObjectName("mainToolBar"); _old.addToolBar(_t)
+    _old = QMainWindow()
+    for _name in ("mainToolBar", "writeToolBar"):       # 1.5.x までのツールバー
+        _t = QToolBar(_name); _t.setObjectName(_name); _old.addToolBar(_t); _old.addToolBarBreak()
     QSettings("PdfPageEditor", "PdfPageEditor").setValue("state", _old.saveState())
     _old.deleteLater()
     for _round in range(2):     # 2 回目は、1 回目の終了時に保存されたレイアウトから
         w12 = MainWindow(); w12.resize(1400, 900); w12.show(); wait(50)
         w12.open_file(write_out); wait(150)
-        assert w12.toolBarArea(w12.toolbar) == Qt.TopToolBarArea and not w12.ribbon.isVisible()
+        assert w12.menuWidget() is w12.rib and w12.rib.geometry().top() == 0 and w12.rib.width() == w12.width()
+        assert not w12.findChildren(QToolBar), "古いツールバーは作られない"
         top0 = w12.centralWidget().geometry().top()
+        assert top0 >= w12.rib.height(), "ページはリボンの下から始まる"
         w12.a_write.trigger(); wait(200)
-        assert ribbon_row(w12), (_round, w12.toolbar.geometry(), w12.ribbon.geometry())
-        assert w12.centralWidget().geometry().top() >= top0 + w12.ribbon.height() - 2, "リボンのぶん、ページの表示が下がる"
-        w12.move_toolbar(Qt.LeftToolBarArea); wait(100)
-        assert ribbon_row(w12), (w12.toolbar.geometry(), w12.ribbon.geometry())
-        w12.move_toolbar(Qt.TopToolBarArea); wait(100)
-        assert ribbon_row(w12), (w12.toolbar.geometry(), w12.ribbon.geometry())
+        assert w12.rib.current() == "write" and w12.ribbon.isVisible() and w12.centralWidget().geometry().top() == top0
+        assert w12.ribbon.geometry().width() >= w12.ribbon.sizeHint().width(), "書き込みの道具がすべて見えている"
         w12.a_write.trigger(); wait(100)
-        assert not w12.ribbon.isVisible() and w12.centralWidget().geometry().top() == top0, "閉じると段ごと消える（空の段を残さない）"
+        assert w12.rib.current() == "home" and not w12.ribbon.isVisible()
         w12.model.modified = False; assert w12.close()
-
 
     step("自動アップデート: 最新なら「最新です」、新版なら更新ダイアログ、スキップは記憶、更新するとダウンロード→インストーラー起動→終了")
     import io, json
