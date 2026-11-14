@@ -588,6 +588,8 @@ class PdfModel:
         bw = float(spec.get("bw") or 1.0)
         bs = spec.get("bs") if spec.get("bs") in fonts.BORDER_STYLES else "solid"
         w, h = fonts.measure(text, spec["font"], spec["size"], wrap_width, max_width=pw - x, pad=fonts.box_pad(border, bw, bs))
+        if x + w > pw:
+            x = max(0.0, pw - w)        # 箱の最小の幅（大きい文字・太い枠）が残りの幅より広いときは、ページに収まるよう左へ寄せる
         if y + h > ph:
             y = max(0.0, ph - h)
         src, w, h = fonts.render_text_pdf(text, spec["font"], spec["size"], color, wrap_width=w, fill=fill,

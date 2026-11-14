@@ -188,6 +188,17 @@ def test_model(pdf):
         x = m.set_annot_style(0, x, fill=None, border=None)
         a3 = m.annot_info(0, x)
         assert a3["fill"] is None and not a3["border"] and a3["border_color"] is None
+        # ページの右端・下端ぎりぎりに書いても、箱はページからはみ出さない（太い 2 重線の枠や大きい文字で、箱の最小の幅が広いとき）
+        pr = m.doc[0].rect
+        for kw in (dict(fontsize=12, border=(0, 0, 1), border_style="double", border_width=3), dict(fontsize=48), dict(fontsize=12)):
+            e = m.add_text_box(0, (pr.width - 5, pr.height - 5), "あ", **kw)
+            er = m.annot_info(0, e)["rect"]
+            assert er.x0 >= -0.01 and er.y0 >= -0.01 and er.x1 <= pr.width + 0.01 and er.y1 <= pr.height + 0.01, (rot, kw, er, pr)
+            # 枠を太くして箱が大きくなっても、はみ出さない
+            e = m.set_annot_style(0, e, border=(1, 0, 0), border_style="double", border_width=3)
+            er = m.annot_info(0, e)["rect"]
+            assert er.x0 >= -0.01 and er.x1 <= pr.width + 0.01 and er.y1 <= pr.height + 0.01, (rot, kw, er, pr)
+            m.remove_annot(0, e)
         x = m.set_annot_text(0, x, "変更後の文字\n2 行目")
         assert m.annot_info(0, x)["text"] == "変更後の文字\n2 行目" and m.annot_info(0, x)["title"] == "山田"
         x = m.set_annot_style(0, x, font="meiryo")
