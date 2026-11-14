@@ -45,6 +45,7 @@ jobs:
           python tests/test_notes_toc.py
           python tests/test_updater.py
           python tests/test_write.py
+          python tests/test_fields.py
           python tests/test_e2e_gui.py
 
   build:
@@ -76,6 +77,7 @@ jobs:
           python tests/test_notes_toc.py
           python tests/test_updater.py
           python tests/test_write.py
+          python tests/test_fields.py
 
       - name: Run GUI E2E on Windows (参考。Windows のオフスクリーンはフォント無し・寸法差があり、必須にしない)
         continue-on-error: true

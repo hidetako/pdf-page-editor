@@ -405,6 +405,7 @@ class PdfModel:
                 "border_color": None,       # 文字の書き込みの枠の色（枠なしは None）
                 "border_style": "solid",    # solid（1 本線）/ dotted（点線）/ double（2 重線）
                 "border_width": 1.0,
+                "field": None,              # 差し替え枠なら、そのルールの写し {"id", "name", "kind", "fmt", "offset"}
                 "arrow": False,
             }
             if t == fitz.PDF_ANNOT_LINE:
@@ -421,6 +422,9 @@ class PdfModel:
                     d["border_color"] = _spec_border_color(spec)
                     d["border_style"] = spec.get("bs") if spec.get("bs") in fonts.BORDER_STYLES else "solid"
                     d["border_width"] = d["width"]
+                    if isinstance(spec.get("field"), dict):
+                        d["field"] = dict(spec["field"])
+                        d["kind"] = "差し替え枠"
                 else:
                     col, size = _parse_da(doc.xref_get_key(annot.xref, "DA")[1])
                     d["stroke"], d["fontsize"], d["fill"] = col, size, None
@@ -547,13 +551,14 @@ class PdfModel:
                      fontsize: float = 12, color: tuple[float, float, float] = (0.85, 0.1, 0.1),
                      fill: tuple[float, float, float] | None = None, border=False,
                      wrap_width: float | None = None, title: str = "",
-                     border_style: str = "solid", border_width: float = 1.0) -> int:
+                     border_style: str = "solid", border_width: float = 1.0, field: dict | None = None) -> int:
         """表示座標 point を左上として文字を書き込む。フォントは PDF に埋め込むので、どのソフトでも同じ見た目になる。
 
         注釈（FreeText）として保存し、見た目だけを埋め込みフォントで描いたものに差し替える。注釈の xref を返す。
         wrap_width を指定するとその幅で折り返す。指定しなければ文字に合わせた幅（ページの右端まで）にする。
         fill は背景の色（None は無色）。border は枠の色（None / False は枠なし。True は文字と同じ色）。
         border_style は "solid"（1 本線）/ "dotted"（点線）/ "double"（2 重線）、border_width は枠の太さ (pt)。
+        field を渡すと「差し替え枠」になる（fields.field_spec() で作るルールの写し）。text はそのときの中身。
         """
         self._require()
         spec = {"v": 1, "font": fonts.resolve(font), "size": float(fontsize), "color": [float(c) for c in color[:3]],
@@ -561,6 +566,8 @@ class PdfModel:
         spec.update(_border_spec(border))
         spec["bs"] = border_style if border_style in fonts.BORDER_STYLES else "solid"
         spec["bw"] = max(0.25, float(border_width))
+        if field:
+            spec["field"] = dict(field)
         self._push_undo()
         xref = self._build_text_box(index, spec, text, fitz.Point(*point), wrap_width, title)
         self.modified = True
@@ -640,6 +647,49 @@ class PdfModel:
             wrap_width = disp.width                 # 今の幅のまま
         return self._build_text_box(index, new_spec, cur_text if text is None else text,
                                     top_left or disp.tl, wrap_width, title)
+
+    # ---- 差し替え枠
+    def fields(self) -> list[dict]:
+        """文書の中の差し替え枠の一覧。各要素は {"index", "xref", "field", "text", "rect"}（ページ順・上から）。"""
+        if self.doc is None:
+            return []
+        out = []
+        for index in range(self.page_count):
+            items = [a for a in self.annots_on_page(index) if a.get("field")]
+            items.sort(key=lambda a: (round(a["rect"].y0, 1), a["rect"].x0))
+            out.extend({"index": index, "xref": a["xref"], "field": a["field"], "text": a["text"], "rect": a["rect"]} for a in items)
+        return out
+
+    def set_field_texts(self, texts: dict[str, str], undo: bool = True, mark_modified: bool = True) -> int:
+        """差し替え枠の中身を入れ替える。texts はルールの番号 → 入れる文字。変えた枠の数を返す。
+
+        日付の自動更新のように「利用者の操作ではない」入れ替えは、undo=False, mark_modified=False で呼ぶ。
+        """
+        todo = [f for f in self.fields() if f["field"].get("id") in texts and texts[f["field"]["id"]] != f["text"]]
+        if not todo:
+            return 0
+        if undo:
+            self._push_undo()
+        for f in todo:
+            self._rebuild_text_box(f["index"], f["xref"], text=texts[f["field"]["id"]], natural=True)
+        if mark_modified:
+            self.modified = True
+        return len(todo)
+
+    def set_field_rule(self, index: int, xref: int, field: dict, text: str) -> int:
+        """枠のルールを別のものに変える（中身も入れ替える）。新しい xref を返す。"""
+        self._require()
+        self._push_undo()
+        self.modified = True
+        return self._rebuild_text_box(index, xref, spec={"field": dict(field)}, text=text, natural=True)
+
+    def snapshot(self) -> "PdfModel":
+        """今の状態の複製を、別の文書として返す。差し替え印刷で、開いている文書を変えずに中身を入れ替えるために使う。"""
+        doc = self._require()
+        m = PdfModel()
+        m.doc = fitz.open(stream=doc.tobytes(garbage=0, deflate=False, encryption=fitz.PDF_ENCRYPT_NONE), filetype="pdf")
+        m.password, m.permissions = self.password, self.permissions
+        return m
 
     # ---- 変更
     def set_annot_text(self, index: int, xref: int, text: str) -> int:

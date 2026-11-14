@@ -51,6 +51,18 @@ def run(log_path: str | None = None) -> int:
             if info is None or info["font"] != key or info["border_style"] != "double":
                 raise RuntimeError(f"text box with font {key} was not created")
             y += 40
+        # 差し替え枠: 日付の枠を置き、複製に中身を入れられるか
+        import datetime
+        import fields
+        rule = fields.RuleBook().get("date")
+        m.add_text_box(0, (300, 100), fields.resolve(rule), fontsize=12, field=fields.field_spec(rule))
+        filled = m.snapshot()
+        changed = filled.set_field_texts({"date": fields.format_date(datetime.date(2030, 1, 2), "wareki_w")}, undo=False, mark_modified=False)
+        got = [f["text"] for f in filled.fields()]
+        filled.close()
+        if changed != 1 or got != ["令和12年1月2日（水）"] or [f["text"] for f in m.fields()] != [fields.resolve(rule)]:
+            raise RuntimeError(f"fill-in field failed: {changed} {got}")
+        lines.append(f"fields: {fields.resolve(rule)} -> {got[0]}")
         out = os.path.join(tmp, "out.pdf")
         m.save(out)
         m.close()
@@ -61,7 +73,7 @@ def run(log_path: str | None = None) -> int:
         del page
         d.close()
         lines.append(f"saved {size} bytes, annots: {', '.join(kinds)}")
-        if kinds.count("FreeText") != len(available) or "Ink" not in kinds or "Line" not in kinds:
+        if kinds.count("FreeText") != len(available) + 1 or "Ink" not in kinds or "Line" not in kinds:      # +1 は差し替え枠
             raise RuntimeError("annotations missing after save")
         if size > 400_000 * max(1, len(available)):
             raise RuntimeError(f"output too large ({size} bytes): fonts were not subset")
