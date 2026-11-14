@@ -1183,7 +1183,13 @@ def main():
     # 文字: メイリオ・16pt・背景=黄・枠あり。文字用の設定に切り替わる
     rb.tool_actions["text"].trigger(); wait()
     assert rb.context() == "text" and w10.view.text_mode and not w10.view.draw_mode
-    rb.cb_font.setCurrentIndex(rb.cb_font.findData("meiryo")); rb.sp_size.setValue(16); rb.cb_bg.setCurrentIndex(2); rb.chk_border.setChecked(True)
+    # 背景と枠は、最初はどちらも「なし」。枠が「なし」のあいだは、線の種類と太さは選べない
+    assert rb.text_bg() is None and rb.text_border() is None and rb.btn_bg.text() == "なし" and rb.btn_border.text() == "なし"
+    assert not rb.cb_border_style.isEnabled() and not rb.cb_border_width.isEnabled()
+    assert rb.box_group.isVisible() and [rb.cb_border_style.itemText(i) for i in range(3)] == ["1本線", "点線", "2重線"]
+    rb.cb_font.setCurrentIndex(rb.cb_font.findData("meiryo")); rb.sp_size.setValue(16)
+    rb.btn_bg.choice_actions["薄い黄"].trigger(); rb.btn_border.choice_actions["赤"].trigger()
+    assert rb.btn_bg.text() == "薄い黄" and near(rb.text_bg(), (1.0, 1.0, 0.8)) and rb.cb_border_style.isEnabled()
     rb.color_buttons[0].click(); wait()
     w10._ask_text = lambda title, label, default="": "確認済み 山田\n2026/11/13"
     QTest.mouseClick(w10.view, Qt.LeftButton, Qt.NoModifier, P10(0.2, 0.72)); wait(150)
@@ -1238,7 +1244,40 @@ def main():
     # 選択中の文字に、フォント・大きさ・背景・枠を適用
     rb.cb_font.setCurrentIndex(0); wait(100)
     assert w10.model.annot_info(*w10.sel_annot)["font"] == "builtin"
-    rb.sp_size.setValue(20); wait(100); rb.cb_bg.setCurrentIndex(0); wait(100); rb.chk_border.setChecked(False); wait(100)
+    rb.sp_size.setValue(20); wait(100)
+    # 枠: 色・線の種類（点線 / 2 重線）・太さを、選択中の文字に適用できる
+    an = w10.model.annot_info(*w10.sel_annot)
+    assert an["border"] and near(an["border_color"], (0.85, 0.10, 0.10)) and an["border_style"] == "solid" and an["border_width"] == 1.0, an
+    rb.btn_border.choice_actions["青"].trigger(); wait(100)
+    an1 = w10.model.annot_info(*w10.sel_annot)
+    assert near(an1["border_color"], (0.10, 0.30, 0.85)) and near(an1["stroke"], (0.85, 0.10, 0.10)), "枠の色は文字の色と別に選べる"
+    rb.cb_border_style.setCurrentIndex(1); wait(100)
+    assert w10.model.annot_info(*w10.sel_annot)["border_style"] == "dotted"
+    rb.cb_border_style.setCurrentIndex(2); wait(100)
+    an2 = w10.model.annot_info(*w10.sel_annot)
+    assert an2["border_style"] == "double" and an2["rect"].height > an1["rect"].height, "2 重線は枠が厚くなるぶん、箱が大きくなる"
+    rb.cb_border_width.setCurrentIndex(2); wait(100)
+    an3 = w10.model.annot_info(*w10.sel_annot)
+    assert an3["border_width"] == 2.0 and an3["rect"].height > an2["rect"].height and an3["text"] == an["text"]
+    _r = an3["rect"]; _pix = w10.model.render(0, 2.0)
+    blue = sum(1 for xx in range(int(_r.x0 * 2), int(_r.x1 * 2)) if _pix.pixel(xx, int(_r.y0 * 2) + 2)[2] > 150 and _pix.pixel(xx, int(_r.y0 * 2) + 2)[0] < 90)
+    assert blue > _r.width, ("青い枠が描かれている", blue)
+    # 背景: 一覧から選ぶ / 他の色
+    rb.btn_bg.choice_actions["薄い青"].trigger(); wait(100)
+    assert near(w10.model.annot_info(*w10.sel_annot)["fill"], (0.86, 0.93, 1.0))
+    w10._ask_color = lambda initial, title: QColor(200, 255, 200)
+    rb.btn_bg.a_other.trigger(); wait(100)
+    assert near(w10.model.annot_info(*w10.sel_annot)["fill"], (200 / 255, 1.0, 200 / 255)) and rb.btn_bg.text() == "他の色"
+    # 選び直すと、リボンの表示がその文字の背景・枠に合う
+    w10._select_annot(None); wait(50)
+    rb.btn_bg.set_color(None); rb.btn_border.set_color(None); rb.cb_border_style.setCurrentIndex(0)
+    w10._select_annot(0, an3["xref"] if w10.model.annot_info(0, an3["xref"]) else w10.model.annots_on_page(0)[-1]["xref"]); wait(100)
+    _ft = [x for x in annots10() if x["kind"] == "文字"][0]
+    w10._select_annot(0, _ft["xref"]); wait(100)
+    assert rb.text_border_style() == "double" and rb.text_border_width() == 2.0 and near(rb.text_border(), (0.10, 0.30, 0.85)) and rb.btn_bg.text() == "他の色"
+    # 枠と背景を「なし」に戻す
+    rb.btn_bg.choice_actions["なし"].trigger(); wait(100); rb.btn_border.choice_actions["なし"].trigger(); wait(100)
+    assert not rb.cb_border_style.isEnabled()
     an = w10.model.annot_info(*w10.sel_annot)
     assert an["fontsize"] == 20.0 and an["fill"] is None and not an["border"] and an["text"].endswith(" 確認"), an
     # つまみで幅を狭めると折り返して高くなる

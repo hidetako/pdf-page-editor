@@ -43,10 +43,12 @@ def run(log_path: str | None = None) -> int:
         lines.append("fonts: " + ", ".join(label for _key, label in available))
         y = 360.0
         for key, label in available:
-            x = m.add_text_box(0, (72, y), f"{label} 自己診断 ABC 123", font=key, fontsize=14)
+            # 背景と枠（2 重線）も付けて、まとめた exe の中で描けるか確かめる
+            x = m.add_text_box(0, (72, y), f"{label} 自己診断 ABC 123", font=key, fontsize=14,
+                               fill=(1.0, 1.0, 0.8), border=(0.1, 0.3, 0.85), border_style="double", border_width=1.0)
             x = m.move_annot(0, x, 10, 0)
             info = m.annot_info(0, x)
-            if info is None or info["font"] != key:
+            if info is None or info["font"] != key or info["border_style"] != "double":
                 raise RuntimeError(f"text box with font {key} was not created")
             y += 40
         out = os.path.join(tmp, "out.pdf")

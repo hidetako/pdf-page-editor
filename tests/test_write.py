@@ -109,7 +109,24 @@ def test_fonts():
         with open(os.path.join(_FAKE, "msgothic.ttc"), "wb") as f:
             f.write(b"this is not a font file" * 1000)
         fonts.available_fonts(refresh=True)
-    print("  fonts: registry / measure / render / cache OK")
+    # 背景と枠: 線の種類ごとに描ける。枠の厚みぶん余白が広がる（1 pt までの枠は従来と同じ大きさ）
+    assert fonts.box_pad() == fonts.PAD and fonts.box_pad((0, 0, 0), 1.0, "solid") == fonts.PAD
+    assert fonts.box_pad((0, 0, 0), 3.0, "solid") == fonts.PAD + 2 and fonts.box_pad((0, 0, 0), 2.0, "double") == fonts.PAD + 5
+    assert fonts.border_thickness(None, 3.0, "double") == 0
+    plain, w0, h0 = fonts.render_text_pdf(SAMPLE, fonts.BUILTIN, 14, (0, 0, 0))
+    plain.close()
+    for style in fonts.BORDER_STYLES:
+        for bw in (0.5, 1.0, 3.0):
+            src, w, h = fonts.render_text_pdf(SAMPLE, fonts.BUILTIN, 14, (0, 0, 0), fill=(1, 1, 0.8), border=(0, 0, 1), border_width=bw, border_style=style)
+            grow = 2 * max(0.0, bw * (3 if style == "double" else 1) - 1)
+            assert close(w, w0 + grow, 0.01) and close(h, h0 + grow, 0.01), (style, bw, w, h, w0, h0)
+            pix = src[0].get_pixmap(dpi=288)        # 1 pt = 4 px。上の辺の線の真ん中の行を見る
+            row = int(bw * 2)
+            blue = sum(1 for xx in range(pix.width) if pix.pixel(xx, row)[2] > 150 and pix.pixel(xx, row)[0] < 120)
+            assert (blue > pix.width * 0.8) if style != "dotted" else (pix.width * 0.15 < blue < pix.width * 0.8), (style, bw, blue, pix.width)
+            assert "ABC" in src[0].get_text() or SAMPLE[:2] in src[0].get_text()
+            src.close()
+    print("  fonts: registry / measure / render / cache / borders OK")
 
 
 def test_model(pdf):
@@ -154,6 +171,23 @@ def test_model(pdf):
         x = m.set_annot_style(0, ids["text"], color=(0, 0, 1), font="builtin", fontsize=18, fill=None, border=False)
         a = m.annot_info(0, x)
         assert a["stroke"] == (0.0, 0.0, 1.0) and a["font"] == "builtin" and a["fontsize"] == 18 and a["fill"] is None and not a["border"], a
+        # 枠: 色・線の種類・太さ。背景と枠は別々に選べる
+        x = m.set_annot_style(0, x, fill=(0.86, 0.93, 1.0), border=(0, 0.55, 0.2), border_style="dotted", border_width=2)
+        a1 = m.annot_info(0, x)
+        assert a1["border"] and a1["border_color"] == (0.0, 0.55, 0.2) and a1["border_style"] == "dotted" and a1["border_width"] == 2.0, a1
+        assert a1["fill"] == (0.86, 0.93, 1.0) and a1["stroke"] == (0.0, 0.0, 1.0), "文字の色はそのまま"
+        x = m.set_annot_style(0, x, border_style="double")
+        a2 = m.annot_info(0, x)
+        assert a2["border_style"] == "double" and a2["border_width"] == 2.0 and a2["border_color"] == (0.0, 0.55, 0.2)
+        assert a2["rect"].height > a1["rect"].height + 3, "2 重線は枠が厚いぶん、文字に重ならないよう箱が大きくなる"
+        assert close(a2["rect"].x0, a1["rect"].x0, 0.01) and close(a2["rect"].y0, a1["rect"].y0, 0.01), "左上は動かない"
+        x = m.set_annot_style(0, x, border_style="no-such-style", border_width=0.5)
+        assert m.annot_info(0, x)["border_style"] == "double" and m.annot_info(0, x)["border_width"] == 0.5, "知らない線の種類は無視する"
+        x = m.set_annot_style(0, x, border=True)
+        assert m.annot_info(0, x)["border_color"] == (0.0, 0.0, 1.0), "True は文字と同じ色（1.6.0 までの「枠」）"
+        x = m.set_annot_style(0, x, fill=None, border=None)
+        a3 = m.annot_info(0, x)
+        assert a3["fill"] is None and not a3["border"] and a3["border_color"] is None
         x = m.set_annot_text(0, x, "変更後の文字\n2 行目")
         assert m.annot_info(0, x)["text"] == "変更後の文字\n2 行目" and m.annot_info(0, x)["title"] == "山田"
         x = m.set_annot_style(0, x, font="meiryo")

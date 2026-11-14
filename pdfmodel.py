@@ -402,6 +402,9 @@ class PdfModel:
                 "fontsize": None,
                 "font": None,
                 "border": False,
+                "border_color": None,       # 文字の書き込みの枠の色（枠なしは None）
+                "border_style": "solid",    # solid（1 本線）/ dotted（点線）/ double（2 重線）
+                "border_width": 1.0,
                 "arrow": False,
             }
             if t == fitz.PDF_ANNOT_LINE:
@@ -415,6 +418,9 @@ class PdfModel:
                     d["fill"] = tuple(spec["fill"]) if spec.get("fill") else None
                     d["border"] = bool(spec.get("border"))
                     d["width"] = float(spec.get("bw") or 1.0)
+                    d["border_color"] = _spec_border_color(spec)
+                    d["border_style"] = spec.get("bs") if spec.get("bs") in fonts.BORDER_STYLES else "solid"
+                    d["border_width"] = d["width"]
                 else:
                     col, size = _parse_da(doc.xref_get_key(annot.xref, "DA")[1])
                     d["stroke"], d["fontsize"], d["fill"] = col, size, None
@@ -539,17 +545,22 @@ class PdfModel:
     # ---- 文字の書き込み（埋め込みフォントで描くテキストボックス）
     def add_text_box(self, index: int, point: tuple[float, float], text: str, font: str = fonts.BUILTIN,
                      fontsize: float = 12, color: tuple[float, float, float] = (0.85, 0.1, 0.1),
-                     fill: tuple[float, float, float] | None = None, border: bool = False,
-                     wrap_width: float | None = None, title: str = "") -> int:
+                     fill: tuple[float, float, float] | None = None, border=False,
+                     wrap_width: float | None = None, title: str = "",
+                     border_style: str = "solid", border_width: float = 1.0) -> int:
         """表示座標 point を左上として文字を書き込む。フォントは PDF に埋め込むので、どのソフトでも同じ見た目になる。
 
         注釈（FreeText）として保存し、見た目だけを埋め込みフォントで描いたものに差し替える。注釈の xref を返す。
         wrap_width を指定するとその幅で折り返す。指定しなければ文字に合わせた幅（ページの右端まで）にする。
+        fill は背景の色（None は無色）。border は枠の色（None / False は枠なし。True は文字と同じ色）。
+        border_style は "solid"（1 本線）/ "dotted"（点線）/ "double"（2 重線）、border_width は枠の太さ (pt)。
         """
         self._require()
         spec = {"v": 1, "font": fonts.resolve(font), "size": float(fontsize), "color": [float(c) for c in color[:3]],
-                "fill": [float(c) for c in fill[:3]] if fill else None, "border": bool(border), "bw": 1.0,
-                "wrap": wrap_width is not None}
+                "fill": [float(c) for c in fill[:3]] if fill else None, "wrap": wrap_width is not None}
+        spec.update(_border_spec(border))
+        spec["bs"] = border_style if border_style in fonts.BORDER_STYLES else "solid"
+        spec["bw"] = max(0.25, float(border_width))
         self._push_undo()
         xref = self._build_text_box(index, spec, text, fitz.Point(*point), wrap_width, title)
         self.modified = True
@@ -573,12 +584,14 @@ class PdfModel:
             wrap_width = max(20.0, min(wrap_width, pw - x))
         color = tuple(spec["color"])
         fill = tuple(spec["fill"]) if spec.get("fill") else None
-        border = color if spec.get("border") else None
-        w, h = fonts.measure(text, spec["font"], spec["size"], wrap_width, max_width=pw - x)
+        border = _spec_border_color(spec)
+        bw = float(spec.get("bw") or 1.0)
+        bs = spec.get("bs") if spec.get("bs") in fonts.BORDER_STYLES else "solid"
+        w, h = fonts.measure(text, spec["font"], spec["size"], wrap_width, max_width=pw - x, pad=fonts.box_pad(border, bw, bs))
         if y + h > ph:
             y = max(0.0, ph - h)
         src, w, h = fonts.render_text_pdf(text, spec["font"], spec["size"], color, wrap_width=w, fill=fill,
-                                          border=border, border_width=spec.get("bw", 1.0), rotation=rotation)
+                                          border=border, border_width=bw, rotation=rotation, border_style=bs)
         del page
         # 見た目（フォーム XObject）を文書に取り込む。作業用のページを末尾に足して貼り、すぐ消す
         sp = doc.new_page(-1, width=src[0].rect.width, height=src[0].rect.height)
@@ -647,10 +660,13 @@ class PdfModel:
 
     def set_annot_style(self, index: int, xref: int, *, color: tuple[float, float, float] | None = None,
                         width: float | None = None, opacity: float | None = None, fill=_UNSET,
-                        font: str | None = None, fontsize: float | None = None, border=_UNSET) -> int:
+                        font: str | None = None, fontsize: float | None = None, border=_UNSET,
+                        border_style: str | None = None, border_width: float | None = None) -> int:
         """注釈の見た目を変える。指定した項目だけ変える。fill=None は塗りなし。注釈の xref を返す。
 
-        文字の書き込みでは color は文字色、width は使わない。それ以外では font / fontsize / border は使わない。
+        文字の書き込みでは color は文字色、fill は背景の色、border は枠の色（None / False は枠なし、True は文字と同じ色）、
+        border_style は枠の線（solid / dotted / double）、border_width は枠の太さ。width は使わない。
+        それ以外の注釈では font / fontsize / border… は使わない。
         """
         doc = self._require()
         page = doc[index]
@@ -670,7 +686,11 @@ class PdfModel:
                 if fill is not _UNSET:
                     spec["fill"] = [float(c) for c in fill[:3]] if fill else None
                 if border is not _UNSET:
-                    spec["border"] = bool(border)
+                    spec.update(_border_spec(border))
+                if border_style is not None and border_style in fonts.BORDER_STYLES:
+                    spec["bs"] = border_style
+                if border_width is not None:
+                    spec["bw"] = max(0.25, float(border_width))
                 del annot, page
                 return self._rebuild_text_box(index, xref, spec=spec, natural=font is not None or fontsize is not None)
             # 他のソフト（または 1.4.0 以前）の文字注釈: 標準の作り直しに任せる
@@ -942,6 +962,23 @@ def _rect_diff(doc: fitz.Document, xref: int) -> tuple[float, float, float, floa
     except Exception:
         pass
     return 0.0, 0.0, 0.0, 0.0
+
+
+def _border_spec(border) -> dict:
+    """枠の指定（色 / True / False / None）を、注釈に保存する形にする。
+    "border" は枠の有無、"bc" は枠の色（None は「文字と同じ色」。1.6.0 までの「枠」はこの形）。"""
+    if border is None or border is False:
+        return {"border": False, "bc": None}
+    if border is True:
+        return {"border": True, "bc": None}
+    return {"border": True, "bc": [float(c) for c in border[:3]]}
+
+
+def _spec_border_color(spec: dict):
+    """保存してある見た目から、枠の色を求める。枠なしは None。"""
+    if not spec.get("border"):
+        return None
+    return tuple(spec["bc"]) if spec.get("bc") else tuple(spec.get("color") or (0, 0, 0))
 
 
 def _parse_da(da: str) -> tuple[tuple[float, float, float], float]:
