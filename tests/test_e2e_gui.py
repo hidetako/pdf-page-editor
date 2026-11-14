@@ -1171,6 +1171,35 @@ def main():
     assert w11.ribbon.isVisible() and w11.ribbon.font_key() == "builtin"
     w11.model.modified = False; assert w11.close()
 
+    step("書き込みリボンの位置: 以前の版で保存したレイアウトからでも、ツールバーの下の段に横幅いっぱいで出る。ツールバーを動かしても同じ")
+    from PySide6.QtWidgets import QMainWindow, QToolBar
+
+    def ribbon_row(w):
+        """リボンが上側の独立した段に、横幅いっぱいで出ているか。ツールバーが上にあるときは、その下の段か。"""
+        tb, rb = w.toolbar.geometry(), w.ribbon.geometry()
+        return (w.ribbon.isVisible() and w.toolBarArea(w.ribbon) == Qt.TopToolBarArea and rb.width() >= w.width() - 4
+                and (w.toolBarArea(w.toolbar) != Qt.TopToolBarArea or rb.top() >= tb.bottom()))
+
+    # リボンが無かった頃（1.4.0 以前）に保存されたレイアウト。そのまま復元すると、リボンがツールバーと同じ段の右端に押し込まれていた
+    _old = QMainWindow(); _t = QToolBar("メイン"); _t.setObjectName("mainToolBar"); _old.addToolBar(_t)
+    QSettings("PdfPageEditor", "PdfPageEditor").setValue("state", _old.saveState())
+    _old.deleteLater()
+    for _round in range(2):     # 2 回目は、1 回目の終了時に保存されたレイアウトから
+        w12 = MainWindow(); w12.resize(1400, 900); w12.show(); wait(50)
+        w12.open_file(write_out); wait(150)
+        assert w12.toolBarArea(w12.toolbar) == Qt.TopToolBarArea and not w12.ribbon.isVisible()
+        top0 = w12.centralWidget().geometry().top()
+        w12.a_write.trigger(); wait(200)
+        assert ribbon_row(w12), (_round, w12.toolbar.geometry(), w12.ribbon.geometry())
+        assert w12.centralWidget().geometry().top() >= top0 + w12.ribbon.height() - 2, "リボンのぶん、ページの表示が下がる"
+        w12.move_toolbar(Qt.LeftToolBarArea); wait(100)
+        assert ribbon_row(w12), (w12.toolbar.geometry(), w12.ribbon.geometry())
+        w12.move_toolbar(Qt.TopToolBarArea); wait(100)
+        assert ribbon_row(w12), (w12.toolbar.geometry(), w12.ribbon.geometry())
+        w12.a_write.trigger(); wait(100)
+        assert not w12.ribbon.isVisible() and w12.centralWidget().geometry().top() == top0, "閉じると段ごと消える（空の段を残さない）"
+        w12.model.modified = False; assert w12.close()
+
 
     step("自動アップデート: 最新なら「最新です」、新版なら更新ダイアログ、スキップは記憶、更新するとダウンロード→インストーラー起動→終了")
     import io, json
