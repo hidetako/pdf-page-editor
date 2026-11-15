@@ -1,6 +1,7 @@
 # PDF Page Editor — 開発ルール（Claude 向け）
 
 - 作業ブランチの PR は、単体テスト（`tests/test_model.py`, `tests/test_stamps.py`, `tests/test_notes_toc.py`, `tests/test_updater.py`, `tests/test_write.py`, `tests/test_fields.py`）と GUI E2E（`tests/test_e2e_gui.py`）が通過したら、ユーザーの確認を待たずに `main` へマージしてよい（2026-10-30 ユーザー指示）。
+- ただし、マージの前に Codex の自動レビューの完了を待つ（2026-11-15 ユーザー指示）。このリポジトリは、PR を下書きから「レビュー可能」にすると Codex（`chatgpt-codex-connector`）がレビューを始め、4〜5 分で PR のコメント「Codex Review Summary」が Completed になる。完了したら指摘（レビューのスレッド）を読み、実害のあるものは再現して**同じ PR の中で**直してからマージする（公開後に指摘が届いて、修正だけの版を出し直すのを避けるため）。直さないものは理由をスレッドに 1 回返信する。15 分ほど待っても完了しない・レビューが始まらないときは、その旨をユーザーに伝えたうえで従来どおりマージしてよい。
 - リリースは `app.py` の `__version__` を上げて `main` にマージするだけ。`.github/workflows/release.yml` が Linux で E2E を含む全テストを実行し（必須）、Windows で単体テストとビルドを行い、タグ `vX.Y.Z` を自動で打って Releases に公開する（手動のタグ push は不要）。Windows 上の E2E は参考扱い（オフスクリーンにフォントが無く寸法も異なるため）。
 - 開発は Windows の `C:\dev\pdf-page-editor` で確認される。OneDrive 配下のフォルダは使わない。
 - ユーザーへの操作案内は PowerShell コマンドを 1 行ずつ別のコードブロックで示す。

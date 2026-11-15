@@ -1533,6 +1533,13 @@ def main():
         assert dlg.history_row.isVisibleTo(dlg) or not dlg.isVisible()
         dlg.cb_history.setCurrentIndex(2); dlg._pick_history(2)
         assert dlg.ed_value.toPlainText() == "外科 鈴木"
+        # 「履歴を消す」: 履歴の欄ごと消える。別のルール（履歴なし）でも欄は出ない
+        other_fixed = fields_mod.Rule("tmp-fixed", "仮", "fixed", "内容あり", history=["内容あり"])
+        dlg.rules.append(other_fixed); dlg._fill_list(); dlg.list.setCurrentRow(len(dlg.rules) - 1)
+        assert not dlg.form.isRowVisible(dlg.history_row), "今の内容しか無い履歴は出さない"
+        dlg.rules.pop(); dlg._fill_list(); dlg.list.setCurrentRow([r.id for r in dlg.rules].index(tanto.id))
+        dlg.ed_value.setPlainText("外科 鈴木")
+        assert dlg.form.isRowVisible(dlg.history_row)
     w13._exec_dialog = with_rules(pick_in_rules)
     w13.a_rules.trigger(); wait(150)
     w13._exec_dialog = _exec0

@@ -168,7 +168,9 @@ class RulesDialog(QDialog):
         self.form.setRowVisible(self.ed_value, kind != "date")
         self.form.setRowVisible(self.chk_remember, kind == "ask")
         rule = self.current_rule()
-        self.form.setRowVisible(self.history_row, kind == "fixed" and rule is not None and bool(rule.history))
+        # 履歴は「今の内容以外」があるときだけ出す（差し替え印刷の画面と同じ。今の内容 1 件だけの一覧は意味が無い）
+        current = self.ed_value.toPlainText().strip()
+        self.form.setRowVisible(self.history_row, kind == "fixed" and rule is not None and any(h != current for h in rule.history))
         self.lbl_value.setText("入れる文字" if kind == "fixed" else "最初に入れておく文字")
         self.lbl_hint.setText({
             "date": "PDF を開いたとき・印刷するときに、その日の日付に自動で変わります。",
@@ -211,6 +213,8 @@ class RulesDialog(QDialog):
         item = self.list.currentItem()
         if item is not None and item.text() != rule.name:
             item.setText(rule.name)
+        current = rule.value.strip()            # 内容を書き換えたら、履歴の欄を出すかどうかも合わせ直す
+        self.form.setRowVisible(self.history_row, rule.kind == "fixed" and any(h != current for h in rule.history))
 
     def accept(self):
         self._store()
